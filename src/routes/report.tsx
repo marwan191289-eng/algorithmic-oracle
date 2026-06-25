@@ -214,7 +214,7 @@ function BookSection({ snap }: { snap: Snap }) {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs mono">
         <KV k="السعر الوسطي" v={fmtPrice(m.mid)} />
         <KV k="السعر الميكروي" v={fmtPrice(m.microPrice)} />
-        <KV k="السبريد %" v={`${(m.spread * 100).toFixed(4)}%`} />
+        <KV k="السبريد %" v={`${m.spreadPct.toFixed(4)}%`} />
         <KV k="ضغط شراء" v={fmtUsd(m.bidUsd)} tone="bull" />
         <KV k="ضغط بيع" v={fmtUsd(m.askUsd)} tone="bear" />
         <KV k="اختلال" v={`${(m.imbalance * 100).toFixed(1)}%`} tone={m.imbalance > 0 ? "bull" : "bear"} />

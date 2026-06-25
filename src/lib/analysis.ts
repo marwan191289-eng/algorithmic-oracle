@@ -95,28 +95,76 @@ export interface PriceWall {
   rank: number;         // 1 = strongest
 }
 
+export type WallMethod = "zscore" | "percentile" | "absolute";
+
 export interface WallReport {
   bidWalls: PriceWall[];
   askWalls: PriceWall[];
-  bidWallUsd: number;       // total USD in bid walls
+  bidWallUsd: number;
   askWallUsd: number;
-  wallImbalance: number;    // (bidWallUsd - askWallUsd) / total ∈ [-1, 1]
+  wallImbalance: number;
   strongestSupport: PriceWall | null;
   strongestResistance: PriceWall | null;
+  // ── used parameters (echoed for transparency) ──
+  used: {
+    method: WallMethod;
+    depth: number;
+    zThreshold: number;
+    percentile: number;
+    absoluteUsd: number;
+    meanUsd: number;
+    sdUsd: number;
+    cutoffUsd: number;     // effective notional cutoff
+  };
 }
 
 export function detectWalls(
   book: OrderBook,
   mid: number,
-  opts: { depth?: number; zThreshold?: number; maxPerSide?: number } = {}
+  opts: {
+    depth?: number;
+    zThreshold?: number;
+    percentile?: number;
+    absoluteUsd?: number;
+    method?: WallMethod;
+    maxPerSide?: number;
+  } = {}
 ): WallReport {
   const depth = opts.depth ?? 200;
   const z = opts.zThreshold ?? 2.5;
+  const percentile = opts.percentile ?? 95;
+  const absoluteUsd = opts.absoluteUsd ?? 250_000;
+  const method: WallMethod = opts.method ?? "zscore";
   const maxPerSide = opts.maxPerSide ?? 8;
+
+  // pooled stats across both sides for transparency display
+  const allUsd: number[] = [];
+  for (const l of book.bids.slice(0, depth)) allUsd.push(l.qty * l.price);
+  for (const l of book.asks.slice(0, depth)) allUsd.push(l.qty * l.price);
+  const meanAll = allUsd.length
+    ? allUsd.reduce((a, b) => a + b, 0) / allUsd.length
+    : 0;
+  const varAll =
+    allUsd.length > 1
+      ? allUsd.reduce((a, b) => a + (b - meanAll) ** 2, 0) / allUsd.length
+      : 0;
+  const sdAll = Math.sqrt(varAll) || 1;
+  const sortedAll = [...allUsd].sort((a, b) => a - b);
+  const pctIdx = Math.min(
+    sortedAll.length - 1,
+    Math.floor((percentile / 100) * sortedAll.length)
+  );
+  const pctCutoff = sortedAll[pctIdx] ?? 0;
+  const cutoffUsd =
+    method === "zscore"
+      ? meanAll + z * sdAll
+      : method === "percentile"
+      ? pctCutoff
+      : absoluteUsd;
 
   const scan = (levels: DepthLevel[], side: "bid" | "ask"): PriceWall[] => {
     const slice = levels.slice(0, depth);
-    if (slice.length < 10) return [];
+    if (slice.length < 5) return [];
     const usds = slice.map((l) => l.qty * l.price);
     const mean = usds.reduce((a, b) => a + b, 0) / usds.length;
     const variance =
@@ -126,27 +174,32 @@ export function detectWalls(
     const walls: PriceWall[] = [];
     slice.forEach((lvl, i) => {
       const usd = usds[i];
-      const strength = (usd - mean) / sd;
-      if (strength >= z) {
+      let pass = false;
+      let strength = 0;
+      if (method === "zscore") {
+        strength = (usd - mean) / sd;
+        pass = strength >= z;
+      } else if (method === "percentile") {
+        strength = (usd - mean) / sd; // for display
+        pass = usd >= pctCutoff;
+      } else {
+        strength = (usd - mean) / sd;
+        pass = usd >= absoluteUsd;
+      }
+      if (pass) {
         walls.push({
           side,
           price: lvl.price,
           qty: lvl.qty,
           usd,
-          distancePct:
-            ((lvl.price - mid) / mid) * 100 * (side === "bid" ? -1 : 1) * -1 * -1, // keep signed: + above, − below
+          distancePct: ((lvl.price - mid) / mid) * 100,
           strength,
           rank: 0,
         });
       }
     });
 
-    // distancePct logic: positive when above mid (ask side), negative when below (bid side)
-    walls.forEach((w) => {
-      w.distancePct = ((w.price - mid) / mid) * 100;
-    });
-
-    walls.sort((a, b) => b.strength - a.strength);
+    walls.sort((a, b) => b.usd - a.usd);
     return walls.slice(0, maxPerSide).map((w, i) => ({ ...w, rank: i + 1 }));
   };
 
@@ -165,8 +218,19 @@ export function detectWalls(
     wallImbalance: (bidWallUsd - askWallUsd) / total,
     strongestSupport: bidWalls[0] ?? null,
     strongestResistance: askWalls[0] ?? null,
+    used: {
+      method,
+      depth,
+      zThreshold: z,
+      percentile,
+      absoluteUsd,
+      meanUsd: meanAll,
+      sdUsd: sdAll,
+      cutoffUsd,
+    },
   };
 }
+
 
 // ──────────────────────────────────────────────────────────────
 //  3.  STOP-HUNT ZONES  (مناطق صيد الأستوبات / السيولة)

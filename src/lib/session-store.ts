@@ -73,6 +73,17 @@ export interface QualityState {
   bySymbol: Record<string, QualityMetrics>;
 }
 
+// ─── Quality history (rolling 60 min, 1-sample-per-second) ───────────────
+export interface QualitySample {
+  t: number;        // epoch ms
+  score: number;    // 0..100
+  latencyMs: number;
+  updateRateHz: number;
+  connected: boolean;
+}
+
+export const QUALITY_HISTORY_MAX = 3600; // ~60 min @1Hz
+
 // ─── Alerts ──────────────────────────────────────────────────────────────
 export interface AlertItem {
   id: string;

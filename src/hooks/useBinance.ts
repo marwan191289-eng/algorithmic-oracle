@@ -38,6 +38,7 @@ export function useLiveDepth(symbol: string) {
         totalMessages,
         disconnects,
       });
+      pushQualitySample(symbol);
     }, 1000);
 
     fetchDepth(symbol, 500).then((b) => alive && setBook(b)).catch(() => {});

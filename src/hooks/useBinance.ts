@@ -11,6 +11,7 @@ export function useLiveDepth(symbol: string) {
   const [book, setBook] = useState<OrderBook | null>(null);
   const [connected, setConnected] = useState(false);
   const updateQuality = useSession((s) => s.updateQuality);
+  const pushQualitySample = useSession((s) => s.pushQualitySample);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

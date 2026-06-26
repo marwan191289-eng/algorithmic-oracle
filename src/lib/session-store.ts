@@ -197,6 +197,24 @@ export const useSession = create<State>((set, get) => ({
       };
     }),
 
+  pushQualitySample: (symbol) =>
+    set((st) => {
+      const q = st.quality.bySymbol[symbol];
+      if (!q) return {};
+      const sample: QualitySample = {
+        t: Date.now(),
+        score: q.score,
+        latencyMs: q.latencyMs,
+        updateRateHz: q.updateRateHz,
+        connected: q.connected,
+      };
+      const prev = st.qualityHistory[symbol] ?? [];
+      const next = [...prev, sample];
+      if (next.length > QUALITY_HISTORY_MAX) next.splice(0, next.length - QUALITY_HISTORY_MAX);
+      return { qualityHistory: { ...st.qualityHistory, [symbol]: next } };
+    }),
+
+
   pushAlert: (a) => {
     const st = get();
     if (!st.alertSettings.enabled) return;

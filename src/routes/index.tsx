@@ -127,6 +127,12 @@ function Header() {
             البث المباشر مفعل
           </div>
           <Link
+            to="/backtest"
+            className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
+          >
+            <FlaskConical className="size-3.5" /> Backtest
+          </Link>
+          <Link
             to="/report"
             className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
           >

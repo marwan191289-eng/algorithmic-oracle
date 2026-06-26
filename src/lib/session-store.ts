@@ -145,6 +145,7 @@ export const useSession = create<State>((set, get) => ({
   unreadAlerts: 0,
   snapshot: null,
   lastAlertKey: {},
+  qualityHistory: {},
 
   setWallSettings: (s) =>
     set((st) => ({ wallSettings: { ...st.wallSettings, ...s } })),

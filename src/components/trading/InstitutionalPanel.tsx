@@ -1,6 +1,7 @@
-import type { InstitutionalVerdict } from "@/lib/analysis";
+import type { InstitutionalVerdict, InstitutionalVerdictV2 } from "@/lib/analysis";
 import { cn } from "@/lib/utils";
-import { Brain, Activity, Waves, Fish } from "lucide-react";
+import { Brain, Activity, Waves, Fish, Target, ShieldAlert } from "lucide-react";
+import { fmtPrice } from "@/lib/binance";
 
 const BIAS_COLORS: Record<InstitutionalVerdict["bias"], string> = {
   "strong-bull": "text-bull glow-bull border-bull/40",

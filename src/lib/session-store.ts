@@ -118,6 +118,7 @@ interface State {
   wallSettings: WallSettings;
   alertSettings: AlertSettings;
   quality: QualityState;
+  qualityHistory: Record<string, QualitySample[]>;
   alerts: AlertItem[];
   unreadAlerts: number;
   snapshot: SessionSnapshot | null;
@@ -129,6 +130,7 @@ interface State {
   setBlockOnLowQuality: (v: boolean) => void;
   setMinAcceptableScore: (v: number) => void;
   updateQuality: (symbol: string, patch: Partial<QualityMetrics>) => void;
+  pushQualitySample: (symbol: string) => void;
   pushAlert: (a: Omit<AlertItem, "id" | "time">) => void;
   clearAlerts: () => void;
   markAlertsRead: () => void;

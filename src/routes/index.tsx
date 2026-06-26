@@ -287,9 +287,8 @@ function SymbolView({
   }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality, saveSnapshot]);
 
   if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
-
   const qScore = quality?.score ?? 100;
-  const blocked = blockOnLow && qScore < minScore;
+  const blocked = blockDecision.blocked;
 
   const up = (ticker?.changePct ?? 0) >= 0;
 

@@ -16,7 +16,7 @@ import {
   computePriceMetrics,
   detectLiquidityZones,
   detectWalls,
-  institutionalScore,
+  institutionalScoreV2,
 } from "@/lib/analysis";
 import { SymbolBar } from "@/components/trading/SymbolBar";
 import { OrderBookHeatmap } from "@/components/trading/OrderBookHeatmap";
@@ -25,12 +25,13 @@ import { LiquidityZonesPanel } from "@/components/trading/LiquidityZonesPanel";
 import { InstitutionalPanel } from "@/components/trading/InstitutionalPanel";
 import { CandleChart } from "@/components/trading/CandleChart";
 import { DataQualityBar, QualityBlockNotice } from "@/components/trading/DataQualityBar";
+import { QualityHistoryChart, useQualityBlockDecision } from "@/components/trading/QualityHistoryChart";
 import { WallSettingsPanel } from "@/components/trading/WallSettingsPanel";
 import { AlertSettingsPanel } from "@/components/trading/AlertSettingsPanel";
 import { AlertsCenter } from "@/components/trading/AlertsCenter";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({

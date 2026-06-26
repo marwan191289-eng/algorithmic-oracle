@@ -339,7 +339,16 @@ function SymbolView({
       </div>
 
       {blocked ? (
-        <QualityBlockNotice symbol={symbol} />
+        <>
+          <div className="rounded-xl border border-bear/40 bg-bear/10 text-bear text-sm p-3 flex items-start gap-2">
+            <AlertTriangle className="size-4 mt-0.5" />
+            <div>
+              <div className="font-semibold">حُجبت النتائج بناءً على اتجاه جودة البيانات</div>
+              <div className="mono text-[11px] opacity-90 mt-0.5">{blockDecision.reason}</div>
+            </div>
+          </div>
+          <QualityBlockNotice symbol={symbol} />
+        </>
       ) : (
         <>
           {/* Institutional verdict — hero */}

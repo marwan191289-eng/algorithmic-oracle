@@ -11,7 +11,9 @@ const BIAS_COLORS: Record<InstitutionalVerdict["bias"], string> = {
   "strong-bear": "text-bear glow-bear border-bear/40",
 };
 
-export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict }) {
+export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict | InstitutionalVerdictV2 }) {
+  const v2 = (verdict as InstitutionalVerdictV2);
+  const hasV2 = typeof v2.confidence === "number";
   const pct = (verdict.score + 100) / 2; // 0..100
   return (
     <div className="rounded-2xl border border-border bg-card/60 p-5 glass space-y-5">

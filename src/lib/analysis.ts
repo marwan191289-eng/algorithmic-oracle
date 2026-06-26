@@ -531,3 +531,202 @@ function fmtUsdShort(n: number) {
   if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
   return `$${n.toFixed(0)}`;
 }
+
+// ──────────────────────────────────────────────────────────────
+//  6.  INSTITUTIONAL SCORE V2  —  محرّك مرجّح متعدّد الطبقات
+//  Adds: proximity-weighted walls, micro-price drift, RSI mean-
+//  reversion damping, signal agreement → confidence, EMA smoothing,
+//  ATR-based targets/stops.
+// ──────────────────────────────────────────────────────────────
+
+export interface InstitutionalVerdictV2 extends InstitutionalVerdict {
+  scoreRaw: number;            // before EMA smoothing
+  confidence: number;          // 0..100 — agreement between components
+  agreement: number;           // count of bullish-vs-bearish components
+  targets: {
+    entry: number;
+    stop: number;
+    tp1: number;
+    tp2: number;
+    rr: number;                // risk:reward of tp1
+    side: "long" | "short" | "none";
+  };
+  components: InstitutionalVerdict["components"] & {
+    microDrift: number;
+    proximityPressure: number;
+    rsiPenalty: number;
+  };
+}
+
+export function institutionalScoreV2(
+  book: BookMetrics,
+  walls: WallReport,
+  price: PriceMetrics,
+  klines: Kline[],
+  opts: { prevScore?: number; emaAlpha?: number } = {}
+): InstitutionalVerdictV2 {
+  const alpha = opts.emaAlpha ?? 0.35;
+
+  // ── 1. core components in [-1,1] ────────────────────────────────────
+  const bookImbalance = clamp(book.imbalance, -1, 1);
+
+  // proximity-weighted wall pressure: a wall 0.1% away counts ~10x a wall 1% away
+  const wallPx = (side: "bid" | "ask", w: PriceWall[]) => {
+    let sum = 0;
+    for (const wl of w) {
+      const dist = Math.max(0.02, Math.abs(wl.distancePct)); // floor 0.02%
+      const wgt = 1 / (1 + dist * 4);
+      sum += wl.usd * wgt * (side === "bid" ? 1 : -1);
+    }
+    return sum;
+  };
+  const bidPx = wallPx("bid", walls.bidWalls);
+  const askPx = wallPx("ask", walls.askWalls);
+  const totalPx = Math.abs(bidPx) + Math.abs(askPx) || 1;
+  const proximityPressure = clamp((bidPx + askPx) / totalPx, -1, 1);
+
+  const momentum = clamp(price.momentum, -1, 1);
+  const volumeTrend = clamp(Math.tanh(price.volumeTrend * 2), -1, 1);
+
+  // micro-price drift: (microPrice - mid) / spread, capped — reveals next-tick lean
+  const sp = Math.max(book.spread, book.mid * 1e-6);
+  const microDrift = clamp(((book.microPrice - book.mid) / sp) * 2, -1, 1);
+
+  // RSI mean-reversion damping (returns a directional penalty)
+  const rsiPenalty =
+    price.rsi >= 80 ? -0.4 :
+    price.rsi >= 72 ? -0.2 :
+    price.rsi <= 20 ?  0.4 :
+    price.rsi <= 28 ?  0.2 : 0;
+
+  const spreadHealth = clamp(1 - price.volatility * 30, 0, 1);
+
+  // ── 2. weighted sum (sums to 1.0) ───────────────────────────────────
+  const weighted =
+    bookImbalance       * 0.22 +
+    proximityPressure   * 0.22 +
+    momentum            * 0.20 +
+    microDrift          * 0.14 +
+    volumeTrend         * 0.10 +
+    rsiPenalty          * 0.12;
+
+  const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth);
+  const scoreRaw = Math.round(raw * 100);
+
+  // ── 3. EMA smoothing — kills frame-to-frame jitter ─────────────────
+  const score =
+    opts.prevScore != null
+      ? Math.round(opts.prevScore * (1 - alpha) + scoreRaw * alpha)
+      : scoreRaw;
+
+  // ── 4. agreement / confidence ───────────────────────────────────────
+  const signs = [
+    bookImbalance, proximityPressure, momentum, microDrift, volumeTrend,
+  ].map((c) => (c > 0.08 ? 1 : c < -0.08 ? -1 : 0));
+  const pos = signs.filter((s) => s === 1).length;
+  const neg = signs.filter((s) => s === -1).length;
+  const dominant = Math.max(pos, neg);
+  const total = pos + neg || 1;
+  const agreementRatio = dominant / total;                // 0..1
+  const dataQuality = spreadHealth;                       // proxy
+  const confidence = Math.round(
+    clamp(agreementRatio * 70 + dataQuality * 25 + (Math.abs(score) / 100) * 5, 0, 100)
+  );
+
+  // ── 5. bias label ───────────────────────────────────────────────────
+  let bias: InstitutionalVerdict["bias"];
+  let label: string;
+  if (score >= 60) {
+    bias = "strong-bull";
+    label = "اتجاه مؤسساتي صاعد قوي — الحيتان تتراكم";
+  } else if (score >= 25) {
+    bias = "bull";
+    label = "ميل صعودي — ضغط الشراء يفوق البيع";
+  } else if (score >= -25) {
+    bias = "neutral";
+    label = "توازن — منطقة تجميع أو توزيع";
+  } else if (score >= -60) {
+    bias = "bear";
+    label = "ميل هبوطي — ضغط البيع يفوق الشراء";
+  } else {
+    bias = "strong-bear";
+    label = "اتجاه مؤسساتي هابط قوي — الدببة مسيطرة";
+  }
+
+  const whaleSide: InstitutionalVerdict["whaleSide"] =
+    walls.wallImbalance > 0.20 ? "buyers" :
+    walls.wallImbalance < -0.20 ? "sellers" : "balanced";
+
+  // ── 6. ATR-based targets ────────────────────────────────────────────
+  const atr = computeATR(klines, 14) || book.mid * 0.003;
+  const side: "long" | "short" | "none" =
+    score >= 25 && confidence >= 55 ? "long" :
+    score <= -25 && confidence >= 55 ? "short" : "none";
+  const entry = book.mid;
+  let stop = entry, tp1 = entry, tp2 = entry;
+  if (side === "long") {
+    stop = walls.strongestSupport
+      ? Math.min(walls.strongestSupport.price - atr * 0.2, entry - atr * 0.8)
+      : entry - atr * 1.0;
+    tp1 = entry + atr * 1.5;
+    tp2 = entry + atr * 3.0;
+  } else if (side === "short") {
+    stop = walls.strongestResistance
+      ? Math.max(walls.strongestResistance.price + atr * 0.2, entry + atr * 0.8)
+      : entry + atr * 1.0;
+    tp1 = entry - atr * 1.5;
+    tp2 = entry - atr * 3.0;
+  }
+  const risk = Math.abs(entry - stop) || 1;
+  const reward = Math.abs(tp1 - entry);
+  const rr = +(reward / risk).toFixed(2);
+
+  // ── 7. reasoning ────────────────────────────────────────────────────
+  const reasoning: string[] = [];
+  reasoning.push(`اختلال الدفتر: ${pctSigned(bookImbalance * 100)} (${bookImbalance > 0 ? "شراء" : "بيع"})`);
+  reasoning.push(`ضغط الجدران المرجَّح بالقرب: ${pctSigned(proximityPressure * 100)}`);
+  reasoning.push(`انجراف السعر الميكروي: ${pctSigned(microDrift * 100)} من السبريد`);
+  reasoning.push(`الزخم الخطّي: ${pctSigned(momentum * 100)}`);
+  reasoning.push(`اتجاه الحجم: ${pctSigned(volumeTrend * 100)}`);
+  reasoning.push(`RSI ${price.rsi.toFixed(1)} — تأثير mean-reversion: ${pctSigned(rsiPenalty * 100)}`);
+  if (walls.strongestSupport)
+    reasoning.push(`أقرب دعم قوي: ${walls.strongestSupport.price.toFixed(4)} (${fmtUsdShort(walls.strongestSupport.usd)})`);
+  if (walls.strongestResistance)
+    reasoning.push(`أقرب مقاومة قوية: ${walls.strongestResistance.price.toFixed(4)} (${fmtUsdShort(walls.strongestResistance.usd)})`);
+  reasoning.push(`الإجماع بين المكوّنات: ${dominant}/${total} → ثقة ${confidence}%`);
+  if (price.volatility > 0.03)
+    reasoning.push(`تحذير: تقلب مرتفع ${(price.volatility * 100).toFixed(2)}%`);
+
+  return {
+    score,
+    scoreRaw,
+    bias,
+    label,
+    whaleSide,
+    confidence,
+    agreement: dominant - (total - dominant),
+    targets: { entry, stop, tp1, tp2, rr, side },
+    components: {
+      bookImbalance,
+      wallPressure: clamp(walls.wallImbalance, -1, 1),
+      momentum,
+      volumeTrend,
+      spreadHealth,
+      microDrift,
+      proximityPressure,
+      rsiPenalty,
+    },
+    reasoning,
+  };
+}
+
+export function computeATR(klines: Kline[], period = 14): number {
+  if (klines.length < period + 1) return 0;
+  let sum = 0;
+  for (let i = klines.length - period; i < klines.length; i++) {
+    const k = klines[i], prev = klines[i - 1];
+    sum += Math.max(k.high - k.low, Math.abs(k.high - prev.close), Math.abs(k.low - prev.close));
+  }
+  return sum / period;
+}
+

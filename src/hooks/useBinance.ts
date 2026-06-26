@@ -105,7 +105,7 @@ export function useLiveDepth(symbol: string) {
       if (retryTimer) window.clearTimeout(retryTimer);
       ws?.close();
     };
-  }, [symbol, updateQuality]);
+  }, [symbol, updateQuality, pushQualitySample]);
 
   return { book, connected };
 }

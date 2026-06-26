@@ -203,13 +203,16 @@ function SymbolView({
     () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid) : []),
     [klines, metrics]
   );
-  const verdict = useMemo(
-    () =>
-      metrics && walls && priceMetrics
-        ? institutionalScore(metrics, walls, priceMetrics)
-        : null,
-    [metrics, walls, priceMetrics]
-  );
+  const prevScoreRef = useRef<number | undefined>(undefined);
+  const verdict = useMemo(() => {
+    if (!metrics || !walls || !priceMetrics || !klines) return null;
+    const v = institutionalScoreV2(metrics, walls, priceMetrics, klines, {
+      prevScore: prevScoreRef.current,
+      emaAlpha: 0.3,
+    });
+    prevScoreRef.current = v.score;
+    return v;
+  }, [metrics, walls, priceMetrics, klines]);
 
   // ─── Alerts engine ────────────────────────────────────────────────────
   useEffect(() => {

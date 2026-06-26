@@ -172,12 +172,11 @@ function SymbolView({
   const { ticker, flash } = useLiveTicker(symbol);
 
   const wallSettings = useSession((s) => s.wallSettings);
-  const blockOnLow = useSession((s) => s.quality.blockOnLowQuality);
-  const minScore = useSession((s) => s.quality.minAcceptableScore);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
   const alertSettings = useSession((s) => s.alertSettings);
   const pushAlert = useSession((s) => s.pushAlert);
   const saveSnapshot = useSession((s) => s.saveSnapshot);
+  const blockDecision = useQualityBlockDecision(symbol);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
 

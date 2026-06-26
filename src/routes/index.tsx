@@ -16,7 +16,7 @@ import {
   computePriceMetrics,
   detectLiquidityZones,
   detectWalls,
-  institutionalScore,
+  institutionalScoreV2,
 } from "@/lib/analysis";
 import { SymbolBar } from "@/components/trading/SymbolBar";
 import { OrderBookHeatmap } from "@/components/trading/OrderBookHeatmap";
@@ -25,12 +25,13 @@ import { LiquidityZonesPanel } from "@/components/trading/LiquidityZonesPanel";
 import { InstitutionalPanel } from "@/components/trading/InstitutionalPanel";
 import { CandleChart } from "@/components/trading/CandleChart";
 import { DataQualityBar, QualityBlockNotice } from "@/components/trading/DataQualityBar";
+import { QualityHistoryChart, useQualityBlockDecision } from "@/components/trading/QualityHistoryChart";
 import { WallSettingsPanel } from "@/components/trading/WallSettingsPanel";
 import { AlertSettingsPanel } from "@/components/trading/AlertSettingsPanel";
 import { AlertsCenter } from "@/components/trading/AlertsCenter";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -88,6 +89,7 @@ function Dashboard() {
         </div>
 
         <DataQualityBar symbol={symbol} />
+        <QualityHistoryChart symbol={symbol} />
 
         {showSettings && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -125,6 +127,12 @@ function Header() {
             <Radio className="size-3 text-bull ticker-pulse" />
             البث المباشر مفعل
           </div>
+          <Link
+            to="/backtest"
+            className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
+          >
+            <FlaskConical className="size-3.5" /> Backtest
+          </Link>
           <Link
             to="/report"
             className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
@@ -164,12 +172,11 @@ function SymbolView({
   const { ticker, flash } = useLiveTicker(symbol);
 
   const wallSettings = useSession((s) => s.wallSettings);
-  const blockOnLow = useSession((s) => s.quality.blockOnLowQuality);
-  const minScore = useSession((s) => s.quality.minAcceptableScore);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
   const alertSettings = useSession((s) => s.alertSettings);
   const pushAlert = useSession((s) => s.pushAlert);
   const saveSnapshot = useSession((s) => s.saveSnapshot);
+  const blockDecision = useQualityBlockDecision(symbol);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
 
@@ -202,13 +209,16 @@ function SymbolView({
     () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid) : []),
     [klines, metrics]
   );
-  const verdict = useMemo(
-    () =>
-      metrics && walls && priceMetrics
-        ? institutionalScore(metrics, walls, priceMetrics)
-        : null,
-    [metrics, walls, priceMetrics]
-  );
+  const prevScoreRef = useRef<number | undefined>(undefined);
+  const verdict = useMemo(() => {
+    if (!metrics || !walls || !priceMetrics || !klines) return null;
+    const v = institutionalScoreV2(metrics, walls, priceMetrics, klines, {
+      prevScore: prevScoreRef.current,
+      emaAlpha: 0.3,
+    });
+    prevScoreRef.current = v.score;
+    return v;
+  }, [metrics, walls, priceMetrics, klines]);
 
   // ─── Alerts engine ────────────────────────────────────────────────────
   useEffect(() => {
@@ -277,9 +287,8 @@ function SymbolView({
   }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality, saveSnapshot]);
 
   if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
-
   const qScore = quality?.score ?? 100;
-  const blocked = blockOnLow && qScore < minScore;
+  const blocked = blockDecision.blocked;
 
   const up = (ticker?.changePct ?? 0) >= 0;
 
@@ -330,7 +339,16 @@ function SymbolView({
       </div>
 
       {blocked ? (
-        <QualityBlockNotice symbol={symbol} />
+        <>
+          <div className="rounded-xl border border-bear/40 bg-bear/10 text-bear text-sm p-3 flex items-start gap-2">
+            <AlertTriangle className="size-4 mt-0.5" />
+            <div>
+              <div className="font-semibold">حُجبت النتائج بناءً على اتجاه جودة البيانات</div>
+              <div className="mono text-[11px] opacity-90 mt-0.5">{blockDecision.reason}</div>
+            </div>
+          </div>
+          <QualityBlockNotice symbol={symbol} />
+        </>
       ) : (
         <>
           {/* Institutional verdict — hero */}

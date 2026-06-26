@@ -73,6 +73,17 @@ export interface QualityState {
   bySymbol: Record<string, QualityMetrics>;
 }
 
+// ─── Quality history (rolling 60 min, 1-sample-per-second) ───────────────
+export interface QualitySample {
+  t: number;        // epoch ms
+  score: number;    // 0..100
+  latencyMs: number;
+  updateRateHz: number;
+  connected: boolean;
+}
+
+export const QUALITY_HISTORY_MAX = 3600; // ~60 min @1Hz
+
 // ─── Alerts ──────────────────────────────────────────────────────────────
 export interface AlertItem {
   id: string;
@@ -107,6 +118,7 @@ interface State {
   wallSettings: WallSettings;
   alertSettings: AlertSettings;
   quality: QualityState;
+  qualityHistory: Record<string, QualitySample[]>;
   alerts: AlertItem[];
   unreadAlerts: number;
   snapshot: SessionSnapshot | null;
@@ -118,6 +130,7 @@ interface State {
   setBlockOnLowQuality: (v: boolean) => void;
   setMinAcceptableScore: (v: number) => void;
   updateQuality: (symbol: string, patch: Partial<QualityMetrics>) => void;
+  pushQualitySample: (symbol: string) => void;
   pushAlert: (a: Omit<AlertItem, "id" | "time">) => void;
   clearAlerts: () => void;
   markAlertsRead: () => void;
@@ -132,6 +145,7 @@ export const useSession = create<State>((set, get) => ({
   unreadAlerts: 0,
   snapshot: null,
   lastAlertKey: {},
+  qualityHistory: {},
 
   setWallSettings: (s) =>
     set((st) => ({ wallSettings: { ...st.wallSettings, ...s } })),
@@ -182,6 +196,24 @@ export const useSession = create<State>((set, get) => ({
         },
       };
     }),
+
+  pushQualitySample: (symbol) =>
+    set((st) => {
+      const q = st.quality.bySymbol[symbol];
+      if (!q) return {};
+      const sample: QualitySample = {
+        t: Date.now(),
+        score: q.score,
+        latencyMs: q.latencyMs,
+        updateRateHz: q.updateRateHz,
+        connected: q.connected,
+      };
+      const prev = st.qualityHistory[symbol] ?? [];
+      const next = [...prev, sample];
+      if (next.length > QUALITY_HISTORY_MAX) next.splice(0, next.length - QUALITY_HISTORY_MAX);
+      return { qualityHistory: { ...st.qualityHistory, [symbol]: next } };
+    }),
+
 
   pushAlert: (a) => {
     const st = get();

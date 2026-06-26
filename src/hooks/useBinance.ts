@@ -11,6 +11,7 @@ export function useLiveDepth(symbol: string) {
   const [book, setBook] = useState<OrderBook | null>(null);
   const [connected, setConnected] = useState(false);
   const updateQuality = useSession((s) => s.updateQuality);
+  const pushQualitySample = useSession((s) => s.pushQualitySample);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -37,6 +38,7 @@ export function useLiveDepth(symbol: string) {
         totalMessages,
         disconnects,
       });
+      pushQualitySample(symbol);
     }, 1000);
 
     fetchDepth(symbol, 500).then((b) => alive && setBook(b)).catch(() => {});
@@ -103,7 +105,7 @@ export function useLiveDepth(symbol: string) {
       if (retryTimer) window.clearTimeout(retryTimer);
       ws?.close();
     };
-  }, [symbol, updateQuality]);
+  }, [symbol, updateQuality, pushQualitySample]);
 
   return { book, connected };
 }

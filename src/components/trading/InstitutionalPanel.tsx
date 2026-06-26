@@ -80,6 +80,56 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
         {verdict.label}
       </div>
 
+      {/* Confidence + Trade plan (V2) */}
+      {hasV2 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="rounded-xl border border-border bg-card/40 p-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">ثقة الإشارة</div>
+            <div className={cn(
+              "mono font-bold text-2xl",
+              v2.confidence >= 70 ? "text-bull" : v2.confidence >= 50 ? "text-gold" : "text-bear"
+            )}>{v2.confidence}%</div>
+            <div className="text-[10px] mono text-muted-foreground mt-1">
+              إجماع المكوّنات: {v2.agreement >= 0 ? "+" : ""}{v2.agreement}
+            </div>
+          </div>
+          <div className={cn(
+            "rounded-xl border p-3",
+            v2.targets.side === "long" ? "border-bull/30 bg-bull/5"
+            : v2.targets.side === "short" ? "border-bear/30 bg-bear/5"
+            : "border-border bg-card/40"
+          )}>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+              <Target className="size-3" /> خطة التداول (ATR)
+            </div>
+            {v2.targets.side === "none" ? (
+              <div className="text-sm text-muted-foreground mt-1">لا توجد إشارة كافية</div>
+            ) : (
+              <div className="mono text-[11px] mt-1 space-y-0.5">
+                <div>الاتجاه: <span className="font-bold">{v2.targets.side === "long" ? "شراء" : "بيع"}</span> · R:R = {v2.targets.rr}</div>
+                <div>دخول: {fmtPrice(v2.targets.entry)}</div>
+                <div>هدف 1: <span className="text-bull">{fmtPrice(v2.targets.tp1)}</span> · هدف 2: <span className="text-bull">{fmtPrice(v2.targets.tp2)}</span></div>
+                <div className="flex items-center gap-1">
+                  <ShieldAlert className="size-3 text-bear" />
+                  ستوب: <span className="text-bear">{fmtPrice(v2.targets.stop)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="rounded-xl border border-border bg-card/40 p-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">قراءة ميكروية</div>
+            <div className="mono text-[11px] mt-1 space-y-0.5">
+              <div>انجراف ميكرو: <span className={v2.components.microDrift > 0 ? "text-bull" : "text-bear"}>{(v2.components.microDrift * 100).toFixed(0)}</span></div>
+              <div>قرب الجدران: <span className={v2.components.proximityPressure > 0 ? "text-bull" : "text-bear"}>{(v2.components.proximityPressure * 100).toFixed(0)}</span></div>
+              <div>تخفيف RSI: <span className={v2.components.rsiPenalty > 0 ? "text-bull" : v2.components.rsiPenalty < 0 ? "text-bear" : "text-muted-foreground"}>{(v2.components.rsiPenalty * 100).toFixed(0)}</span></div>
+              {typeof v2.scoreRaw === "number" && (
+                <div className="text-muted-foreground">قبل التنعيم: {v2.scoreRaw > 0 ? "+" : ""}{v2.scoreRaw}</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Components */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
         <Comp label="دفتر الأوامر" value={verdict.components.bookImbalance} />

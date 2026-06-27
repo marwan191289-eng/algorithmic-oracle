@@ -437,28 +437,32 @@ function SymbolView({
 
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <Panel
-              icon={<Crosshair className="size-4 text-primary" />}
-              title="الجدران السعرية (دعوم ومقاومات)"
-              extra={
-                <span className="text-[10px] mono text-muted-foreground">
-                  {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
-                  {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
-                  {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
-                  {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
-                </span>
-              }
-            >
-              {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
-            </Panel>
+            <div id="walls-panel" className="scroll-mt-24">
+              <Panel
+                icon={<Crosshair className="size-4 text-primary" />}
+                title="الجدران السعرية (دعوم ومقاومات)"
+                extra={
+                  <span className="text-[10px] mono text-muted-foreground">
+                    {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
+                    {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
+                    {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
+                    {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
+                  </span>
+                }
+              >
+                {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
+              </Panel>
+            </div>
 
-            <Panel
-              icon={<Crosshair className="size-4 text-gold" />}
-              title="مناطق صيد الستوبات (السيولة)"
-              extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
-            >
-              <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
-            </Panel>
+            <div id="zones-panel" className="scroll-mt-24">
+              <Panel
+                icon={<Crosshair className="size-4 text-gold" />}
+                title="مناطق صيد الستوبات (السيولة)"
+                extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
+              >
+                <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
+              </Panel>
+            </div>
           </div>
         </>
       )}

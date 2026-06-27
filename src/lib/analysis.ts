@@ -14,18 +14,19 @@ export interface BookMetrics {
   mid: number;
   bestBid: number;
   bestAsk: number;
-  spread: number;        // bestAsk - bestBid
-  spreadPct: number;     // spread / mid * 100
-  bidVol: number;        // base-asset qty in top N
+  spread: number;            // bestAsk - bestBid
+  spreadPct: number;         // spread / mid * 100
+  bidVol: number;            // base-asset qty in top N
   askVol: number;
-  bidUsd: number;        // notional value (qty * price)
+  bidUsd: number;            // notional value (qty * price)
   askUsd: number;
-  imbalance: number;     // (bidUsd - askUsd) / (bidUsd + askUsd) ∈ [-1, 1]
-  vwapBid: number;       // volume-weighted bid VWAP top N
+  imbalance: number;         // (bidUsd - askUsd) / (bidUsd + askUsd) ∈ [-1, 1]
+  proximityImbalance: number;// proximity-weighted imbalance (near orders count more)
+  vwapBid: number;           // volume-weighted bid VWAP top N
   vwapAsk: number;
-  pressureBid: number;   // 1 / Σ (qty_i * distance_i) — closer & larger = higher
+  pressureBid: number;       // Σ (qty_i * price_i / distance_i) — closer & larger = higher
   pressureAsk: number;
-  microPrice: number;    // (askVol*bestBid + bidVol*bestAsk)/(bidVol+askVol)
+  microPrice: number;        // (askVol*bestBid + bidVol*bestAsk)/(bidVol+askVol)
   topN: number;
 }
 
@@ -59,6 +60,21 @@ export function computeBookMetrics(book: OrderBook, topN = 50): BookMetrics {
   const totalUsd = bidUsd + askUsd || 1;
   const totalVol = bidVol + askVol || 1;
 
+  // Proximity-weighted imbalance (Python InstitutionalEngine port):
+  // Orders near the mid count much more than distant ones — weight = 1 / (distPct + 0.0001)
+  let proxBid = 0, proxAsk = 0;
+  for (const b of bids) {
+    const distPct = Math.max(0, (mid - b.price) / (mid || 1));
+    const w = 1 / (distPct + 0.0001);
+    proxBid += b.qty * b.price * w;
+  }
+  for (const a of asks) {
+    const distPct = Math.max(0, (a.price - mid) / (mid || 1));
+    const w = 1 / (distPct + 0.0001);
+    proxAsk += a.qty * a.price * w;
+  }
+  const proxTotal = proxBid + proxAsk || 1;
+
   return {
     mid,
     bestBid,
@@ -70,6 +86,7 @@ export function computeBookMetrics(book: OrderBook, topN = 50): BookMetrics {
     bidUsd,
     askUsd,
     imbalance: (bidUsd - askUsd) / totalUsd,
+    proximityImbalance: Math.max(-1, Math.min(1, (proxBid - proxAsk) / proxTotal)),
     vwapBid: bidVol ? bidPxQty / bidVol : 0,
     vwapAsk: askVol ? askPxQty / askVol : 0,
     pressureBid: pBid,
@@ -328,20 +345,21 @@ export function detectLiquidityZones(
 // ──────────────────────────────────────────────────────────────
 
 export interface PriceMetrics {
-  momentum: number;    // ∈ [-1, 1] — tanh of normalized linreg slope
-  volatility: number;  // ATR / price
-  volumeTrend: number; // last10vol / prev20vol − 1 ∈ ~[-1, +∞)
+  momentum: number;       // ∈ [-1, 1] — tanh of normalized linreg slope (price)
+  logVolMomentum: number; // ∈ [-1, 1] — tanh of log-linear regression slope on volume (Python port)
+  volatility: number;     // ATR / price
+  volumeTrend: number;    // last10vol / prev20vol − 1 ∈ ~[-1, +∞)
   rsi: number;
 }
 
 export function computePriceMetrics(klines: Kline[]): PriceMetrics {
   if (klines.length < 30)
-    return { momentum: 0, volatility: 0, volumeTrend: 0, rsi: 50 };
+    return { momentum: 0, logVolMomentum: 0, volatility: 0, volumeTrend: 0, rsi: 50 };
   const closes = klines.map((k) => k.close);
   const n = Math.min(50, closes.length);
   const recent = closes.slice(-n);
 
-  // Linear regression slope (normalized by mean)
+  // Linear regression slope on price (normalized by mean)
   const xs = recent.map((_, i) => i);
   const mx = xs.reduce((a, b) => a + b, 0) / n;
   const my = recent.reduce((a, b) => a + b, 0) / n;
@@ -352,6 +370,23 @@ export function computePriceMetrics(klines: Kline[]): PriceMetrics {
   }
   const slope = den ? num / den : 0;
   const momentum = Math.tanh((slope * n) / (my || 1) * 6);
+
+  // Log-linear regression slope on volume (Python InstitutionalEngine.compute_momentum port)
+  // Fits a line to log(volume) — detects log-acceleration in volume flow
+  const vols = klines.map((k) => k.volume);
+  const volN = Math.min(30, vols.length);
+  const recentVols = vols.slice(-volN);
+  const logVols = recentVols.map((v) => Math.log(v + 1e-9));
+  const vxs = logVols.map((_, i) => i);
+  const vmx = (volN - 1) / 2;
+  const vmy = logVols.reduce((a, b) => a + b, 0) / volN;
+  let vNum = 0, vDen = 0;
+  for (let i = 0; i < volN; i++) {
+    vNum += (vxs[i] - vmx) * (logVols[i] - vmy);
+    vDen += (vxs[i] - vmx) ** 2;
+  }
+  const logVolSlope = vDen ? vNum / vDen : 0;
+  const logVolMomentum = Math.tanh(logVolSlope * 10);
 
   // ATR(14)
   let atrSum = 0;
@@ -369,8 +404,7 @@ export function computePriceMetrics(klines: Kline[]): PriceMetrics {
   const atr = atrSum / period;
   const volatility = atr / (closes[closes.length - 1] || 1);
 
-  // Volume trend
-  const vols = klines.map((k) => k.volume);
+  // Volume trend (short-window vs medium-window)
   const last10 = avg(vols.slice(-10));
   const prev20 = avg(vols.slice(-30, -10));
   const volumeTrend = prev20 ? last10 / prev20 - 1 : 0;
@@ -378,7 +412,7 @@ export function computePriceMetrics(klines: Kline[]): PriceMetrics {
   // RSI(14)
   const rsi = computeRSI(closes, 14);
 
-  return { momentum, volatility, volumeTrend, rsi };
+  return { momentum, logVolMomentum, volatility, volumeTrend, rsi };
 }
 
 function avg(a: number[]) {
@@ -568,7 +602,8 @@ export function institutionalScoreV2(
   const alpha = opts.emaAlpha ?? 0.35;
 
   // ── 1. core components in [-1,1] ────────────────────────────────────
-  const bookImbalance = clamp(book.imbalance, -1, 1);
+  // Use proximity-weighted imbalance (Python port) — near-mid orders dominate
+  const bookImbalance = clamp(book.proximityImbalance, -1, 1);
 
   // proximity-weighted wall pressure: a wall 0.1% away counts ~10x a wall 1% away
   const wallPx = (side: "bid" | "ask", w: PriceWall[]) => {
@@ -586,13 +621,18 @@ export function institutionalScoreV2(
   const proximityPressure = clamp((bidPx + askPx) / totalPx, -1, 1);
 
   const momentum = clamp(price.momentum, -1, 1);
-  const volumeTrend = clamp(Math.tanh(price.volumeTrend * 2), -1, 1);
+  // Log-volume momentum (Python InstitutionalEngine port) used to weight volume component
+  const logVolMom = clamp(price.logVolMomentum, -1, 1);
+  const volumeTrend = clamp(
+    (Math.tanh(price.volumeTrend * 2) + logVolMom) / 2,
+    -1, 1
+  );
 
   // micro-price drift: (microPrice - mid) / spread, capped — reveals next-tick lean
   const sp = Math.max(book.spread, book.mid * 1e-6);
   const microDrift = clamp(((book.microPrice - book.mid) / sp) * 2, -1, 1);
 
-  // RSI mean-reversion damping (returns a directional penalty)
+  // RSI mean-reversion damping — signed penalty (Python: rsiDamping * 2 - 1 clipped)
   const rsiPenalty =
     price.rsi >= 80 ? -0.4 :
     price.rsi >= 72 ? -0.2 :
@@ -601,14 +641,14 @@ export function institutionalScoreV2(
 
   const spreadHealth = clamp(1 - price.volatility * 30, 0, 1);
 
-  // ── 2. weighted sum (sums to 1.0) ───────────────────────────────────
+  // ── 2. weighted sum — matches Python weight schema (sums to 1.0) ────
   const weighted =
-    bookImbalance       * 0.22 +
-    proximityPressure   * 0.22 +
-    momentum            * 0.20 +
-    microDrift          * 0.14 +
-    volumeTrend         * 0.10 +
-    rsiPenalty          * 0.12;
+    bookImbalance       * 0.25 +  // proximity imbalance (Python: 0.25)
+    proximityPressure   * 0.20 +  // wall proximity pressure (Python: 0.20)
+    momentum            * 0.15 +  // price momentum (Python: 0.15)
+    rsiPenalty          * 0.15 +  // RSI damping (Python: 0.15)
+    volumeTrend         * 0.15 +  // volume direction (Python: 0.15)
+    microDrift          * 0.10;   // micro drift (Python: 0.10)
 
   const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth);
   const scoreRaw = Math.round(raw * 100);
@@ -619,7 +659,7 @@ export function institutionalScoreV2(
       ? Math.round(opts.prevScore * (1 - alpha) + scoreRaw * alpha)
       : scoreRaw;
 
-  // ── 4. agreement / confidence ───────────────────────────────────────
+  // ── 4. agreement / confidence — Python formula: 60% agreement + 40% quality ─
   const signs = [
     bookImbalance, proximityPressure, momentum, microDrift, volumeTrend,
   ].map((c) => (c > 0.08 ? 1 : c < -0.08 ? -1 : 0));
@@ -627,10 +667,10 @@ export function institutionalScoreV2(
   const neg = signs.filter((s) => s === -1).length;
   const dominant = Math.max(pos, neg);
   const total = pos + neg || 1;
-  const agreementRatio = dominant / total;                // 0..1
-  const dataQuality = spreadHealth;                       // proxy
+  const agreementRatio = dominant / total;           // 0..1 (Python: |sum(signs)| / len)
+  const qualityFactor = clamp(spreadHealth, 0, 1);   // proxy for data quality
   const confidence = Math.round(
-    clamp(agreementRatio * 70 + dataQuality * 25 + (Math.abs(score) / 100) * 5, 0, 100)
+    clamp(100 * (0.6 * agreementRatio + 0.4 * qualityFactor), 0, 100)
   );
 
   // ── 5. bias label ───────────────────────────────────────────────────
@@ -683,17 +723,18 @@ export function institutionalScoreV2(
 
   // ── 7. reasoning ────────────────────────────────────────────────────
   const reasoning: string[] = [];
-  reasoning.push(`اختلال الدفتر: ${pctSigned(bookImbalance * 100)} (${bookImbalance > 0 ? "شراء" : "بيع"})`);
+  reasoning.push(`اختلال القرب المرجَّح: ${pctSigned(bookImbalance * 100)} (${bookImbalance > 0 ? "شراء" : "بيع"}) — الأوامر القريبة من المنتصف تهيمن`);
   reasoning.push(`ضغط الجدران المرجَّح بالقرب: ${pctSigned(proximityPressure * 100)}`);
   reasoning.push(`انجراف السعر الميكروي: ${pctSigned(microDrift * 100)} من السبريد`);
-  reasoning.push(`الزخم الخطّي: ${pctSigned(momentum * 100)}`);
-  reasoning.push(`اتجاه الحجم: ${pctSigned(volumeTrend * 100)}`);
+  reasoning.push(`الزخم الخطّي للسعر: ${pctSigned(momentum * 100)}`);
+  reasoning.push(`زخم الحجم اللوغاريتمي: ${pctSigned(price.logVolMomentum * 100)} — انحدار خطي على log(حجم)`);
+  reasoning.push(`اتجاه الحجم المركّب: ${pctSigned(volumeTrend * 100)}`);
   reasoning.push(`RSI ${price.rsi.toFixed(1)} — تأثير mean-reversion: ${pctSigned(rsiPenalty * 100)}`);
   if (walls.strongestSupport)
     reasoning.push(`أقرب دعم قوي: ${walls.strongestSupport.price.toFixed(4)} (${fmtUsdShort(walls.strongestSupport.usd)})`);
   if (walls.strongestResistance)
     reasoning.push(`أقرب مقاومة قوية: ${walls.strongestResistance.price.toFixed(4)} (${fmtUsdShort(walls.strongestResistance.usd)})`);
-  reasoning.push(`الإجماع بين المكوّنات: ${dominant}/${total} → ثقة ${confidence}%`);
+  reasoning.push(`الإجماع: ${dominant}/${total} مكوّن → ثقة ${confidence}% (60% إجماع + 40% جودة بيانات)`);
   if (price.volatility > 0.03)
     reasoning.push(`تحذير: تقلب مرتفع ${(price.volatility * 100).toFixed(2)}%`);
 

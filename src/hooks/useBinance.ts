@@ -10,8 +10,13 @@ import { useSession } from "@/lib/session-store";
 export function useLiveDepth(symbol: string) {
   const [book, setBook] = useState<OrderBook | null>(null);
   const [connected, setConnected] = useState(false);
-  const updateQuality = useSession((s) => s.updateQuality);
-  const pushQualitySample = useSession((s) => s.pushQualitySample);
+  const updateQualityRef = useRef(useSession.getState().updateQuality);
+  const pushQualitySampleRef = useRef(useSession.getState().pushQualitySample);
+
+  useEffect(() => {
+    updateQualityRef.current = useSession.getState().updateQuality;
+    pushQualitySampleRef.current = useSession.getState().pushQualitySample;
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -30,7 +35,7 @@ export function useLiveDepth(symbol: string) {
       msgTimestamps = msgTimestamps.filter((t) => now - t < 5000);
       const rate = msgTimestamps.length / 5;
       const avgLat = latCount ? latSum / latCount : 0;
-      updateQuality(symbol, {
+      updateQualityRef.current(symbol, {
         symbol,
         updateRateHz: rate,
         latencyMs: avgLat,
@@ -38,7 +43,7 @@ export function useLiveDepth(symbol: string) {
         totalMessages,
         disconnects,
       });
-      pushQualitySample(symbol);
+      pushQualitySampleRef.current(symbol);
     }, 1000);
 
     fetchDepth(symbol, 500).then((b) => alive && setBook(b)).catch(() => {});
@@ -50,13 +55,13 @@ export function useLiveDepth(symbol: string) {
       ws.onopen = () => {
         if (!alive) return;
         setConnected(true);
-        updateQuality(symbol, { symbol, connected: true });
+        updateQualityRef.current(symbol, { symbol, connected: true });
       };
       ws.onclose = () => {
         if (!alive) return;
         setConnected(false);
         disconnects += 1;
-        updateQuality(symbol, { symbol, connected: false, disconnects });
+        updateQualityRef.current(symbol, { symbol, connected: false, disconnects });
         retryTimer = window.setTimeout(connect, 2000);
       };
       ws.onerror = () => ws?.close();
@@ -105,7 +110,7 @@ export function useLiveDepth(symbol: string) {
       if (retryTimer) window.clearTimeout(retryTimer);
       ws?.close();
     };
-  }, [symbol, updateQuality, pushQualitySample]);
+  }, [symbol]);
 
   return { book, connected };
 }

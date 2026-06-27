@@ -19,8 +19,10 @@ function slopePerMin(samples: { t: number; score: number }[]): number {
   return (n * sxy - sx * sy) / denom;
 }
 
+const EMPTY_HISTORY: import("@/lib/session-store").QualitySample[] = [];
+
 export function QualityHistoryChart({ symbol }: { symbol: string }) {
-  const history = useSession((s) => s.qualityHistory[symbol] ?? []);
+  const history = useSession((s) => s.qualityHistory[symbol] ?? EMPTY_HISTORY);
 
   const { slope, avg, recentAvg, drop, trend } = useMemo(() => {
     if (history.length < 10)
@@ -143,7 +145,7 @@ export function useQualityBlockDecision(symbol: string): {
   blocked: boolean;
   reason: string;
 } {
-  const history = useSession((s) => s.qualityHistory[symbol] ?? []);
+  const history = useSession((s) => s.qualityHistory[symbol] ?? EMPTY_HISTORY);
   const enabled = useSession((s) => s.quality.blockOnLowQuality);
   const min = useSession((s) => s.quality.minAcceptableScore);
   const live = useSession((s) => s.quality.bySymbol[symbol]);

@@ -183,11 +183,17 @@ function SymbolView({
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
   const alertSettings = useSession((s) => s.alertSettings);
-  const pushAlert = useSession((s) => s.pushAlert);
-  const saveSnapshot = useSession((s) => s.saveSnapshot);
-  const pushLiveSignal = useSession((s) => s.pushLiveSignal);
   const blockDecision = useQualityBlockDecision(symbol);
   useQualitySlopeAlert(symbol);
+
+  const pushAlertRef = useRef(useSession.getState().pushAlert);
+  const saveSnapshotRef = useRef(useSession.getState().saveSnapshot);
+  const pushLiveSignalRef = useRef(useSession.getState().pushLiveSignal);
+  useEffect(() => {
+    pushAlertRef.current = useSession.getState().pushAlert;
+    saveSnapshotRef.current = useSession.getState().saveSnapshot;
+    pushLiveSignalRef.current = useSession.getState().pushLiveSignal;
+  });
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
 
@@ -238,7 +244,7 @@ function SymbolView({
       .filter((w) => w.usd >= alertSettings.wallUsdThreshold)
       .sort((a, b) => b.usd - a.usd)[0];
     if (big) {
-      pushAlert({
+      pushAlertRef.current({
         symbol,
         type: "wall",
         severity: big.usd > alertSettings.wallUsdThreshold * 3 ? "critical" : "warn",
@@ -248,7 +254,7 @@ function SymbolView({
       });
     }
     if (Math.abs(metrics.imbalance) >= alertSettings.imbalanceThreshold) {
-      pushAlert({
+      pushAlertRef.current({
         symbol,
         type: "imbalance",
         severity: Math.abs(metrics.imbalance) > 0.7 ? "critical" : "warn",
@@ -257,7 +263,7 @@ function SymbolView({
         price: metrics.mid,
       });
     }
-  }, [walls, metrics, alertSettings.wallUsdThreshold, alertSettings.imbalanceThreshold, symbol, pushAlert]);
+  }, [walls, metrics, alertSettings.wallUsdThreshold, alertSettings.imbalanceThreshold, symbol]);
 
   useEffect(() => {
     if (!zones.length) return;
@@ -265,7 +271,7 @@ function SymbolView({
       const prob = (z as any).probability ?? (z as any).strength ?? 0;
       const p = typeof prob === "number" && prob <= 1 ? prob * 100 : prob;
       if (p >= alertSettings.stopHuntProbThreshold) {
-        pushAlert({
+        pushAlertRef.current({
           symbol,
           type: "stop_hunt",
           severity: p >= 85 ? "critical" : "warn",
@@ -275,12 +281,12 @@ function SymbolView({
         });
       }
     }
-  }, [zones, alertSettings.stopHuntProbThreshold, symbol, pushAlert]);
+  }, [zones, alertSettings.stopHuntProbThreshold, symbol]);
 
   // ─── Auto-save snapshot for PDF report ────────────────────────────────
   useEffect(() => {
     if (!metrics || !walls || !priceMetrics || !verdict) return;
-    saveSnapshot({
+    saveSnapshotRef.current({
       symbol,
       interval,
       capturedAt: Date.now(),
@@ -295,7 +301,7 @@ function SymbolView({
       quality: quality ?? null,
       chartImage: null,
     });
-  }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality, saveSnapshot]);
+  }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality]);
 
   // ─── Log live signal for Live-vs-Backtest comparison ──────────────────
   const lastLogRef = useRef(0);
@@ -304,14 +310,14 @@ function SymbolView({
     const now = Date.now();
     if (now - lastLogRef.current < 5000) return; // ≥5s spacing
     lastLogRef.current = now;
-    pushLiveSignal({
+    pushLiveSignalRef.current({
       t: now, symbol, interval,
       score: verdict.score,
       side: (verdict as any).targets?.side ?? "none",
       confidence: (verdict as any).confidence ?? 0,
       mid: metrics.mid,
     });
-  }, [verdict, metrics, symbol, interval, pushLiveSignal]);
+  }, [verdict, metrics, symbol, interval]);
 
   if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
   const qScore = quality?.score ?? 100;

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
-import { useSession } from "@/lib/session-store";
+import { useSession, type QualitySample } from "@/lib/session-store";
+
+const EMPTY_HISTORY: QualitySample[] = [];
 
 /** Slope per minute on score over recent samples (mins). */
 function slopePerMin(samples: { t: number; score: number }[]): number {
@@ -22,10 +24,13 @@ function slopePerMin(samples: { t: number; score: number }[]): number {
  */
 export function useQualitySlopeAlert(symbol: string) {
   const cfg = useSession((s) => s.qualityAlert);
-  const history = useSession((s) => s.qualityHistory[symbol] ?? []);
-  const pushAlert = useSession((s) => s.pushAlert);
+  const history = useSession((s) => s.qualityHistory[symbol] ?? EMPTY_HISTORY);
   const sinceRef = useRef<number | null>(null);
   const lastFiredRef = useRef<number>(0);
+  const pushAlertRef = useRef(useSession.getState().pushAlert);
+  useEffect(() => {
+    pushAlertRef.current = useSession.getState().pushAlert;
+  });
 
   useEffect(() => {
     if (!cfg.enabled || history.length < 15) {
@@ -48,7 +53,7 @@ export function useQualitySlopeAlert(symbol: string) {
       const cooldownOk = now - lastFiredRef.current >= cfg.cooldownSec * 1000;
       if (sustainedSec >= cfg.confirmSec && cooldownOk) {
         lastFiredRef.current = now;
-        pushAlert({
+        pushAlertRef.current({
           symbol,
           type: "imbalance", // reuse channel
           severity: recentAvg < cfg.scoreFloor - 15 ? "critical" : "warn",
@@ -59,5 +64,5 @@ export function useQualitySlopeAlert(symbol: string) {
     } else {
       sinceRef.current = null;
     }
-  }, [history, cfg, symbol, pushAlert]);
+  }, [history, cfg, symbol]);
 }

@@ -1,2 +1,3 @@
 - [Zustand action ref pattern](zustand-action-refs.md) — never put Zustand action selectors in useEffect deps; use useRef + getState() instead
 - [Analysis algorithm upgrades](analysis-algorithm.md) — proximity imbalance, log-vol momentum, Python-aligned confidence (60% agreement + 40% quality) all live in analysis.ts
+- [RL Agent panel pattern](rl-agent-panel.md) — RLAgentPanel is a self-contained rule-based PPO approximation; takes verdict + metrics props, manages its own active/log state

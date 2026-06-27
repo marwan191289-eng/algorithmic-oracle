@@ -33,6 +33,7 @@ import { QualityAlertPanel } from "@/components/trading/QualityAlertPanel";
 import { useQualitySlopeAlert } from "@/hooks/useQualitySlopeAlert";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
+import { RLAgentPanel } from "@/components/trading/RLAgentPanel";
 import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare } from "lucide-react";
 
 export const Route = createFileRoute("/")({
@@ -470,6 +471,9 @@ function SymbolView({
               </Panel>
             </div>
           </div>
+
+          {/* RL Agent */}
+          <RLAgentPanel verdict={verdict as any} metrics={metrics} />
         </>
       )}
     </div>

@@ -297,6 +297,22 @@ function SymbolView({
     });
   }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality, saveSnapshot]);
 
+  // ─── Log live signal for Live-vs-Backtest comparison ──────────────────
+  const lastLogRef = useRef(0);
+  useEffect(() => {
+    if (!verdict || !metrics) return;
+    const now = Date.now();
+    if (now - lastLogRef.current < 5000) return; // ≥5s spacing
+    lastLogRef.current = now;
+    pushLiveSignal({
+      t: now, symbol, interval,
+      score: verdict.score,
+      side: (verdict as any).targets?.side ?? "none",
+      confidence: (verdict as any).confidence ?? 0,
+      mid: metrics.mid,
+    });
+  }, [verdict, metrics, symbol, interval, pushLiveSignal]);
+
   if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
   const qScore = quality?.score ?? 100;
   const blocked = blockDecision.blocked;

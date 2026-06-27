@@ -148,14 +148,19 @@ interface State {
   alertSettings: AlertSettings;
   quality: QualityState;
   qualityHistory: Record<string, QualitySample[]>;
+  qualityAlert: QualityAlertConfig;
   alerts: AlertItem[];
   unreadAlerts: number;
   snapshot: SessionSnapshot | null;
-  lastAlertKey: Record<string, number>; // anti-spam
+  lastAlertKey: Record<string, number>;
+  liveSignalLog: Record<string, LiveSignalSample[]>;
+  lastBacktest: BacktestResult | null;
+  previousBacktest: BacktestResult | null;
 
   setWallSettings: (s: Partial<WallSettings>) => void;
   resetWallSettings: () => void;
   setAlertSettings: (s: Partial<AlertSettings>) => void;
+  setQualityAlert: (s: Partial<QualityAlertConfig>) => void;
   setBlockOnLowQuality: (v: boolean) => void;
   setMinAcceptableScore: (v: number) => void;
   updateQuality: (symbol: string, patch: Partial<QualityMetrics>) => void;
@@ -164,17 +169,23 @@ interface State {
   clearAlerts: () => void;
   markAlertsRead: () => void;
   saveSnapshot: (s: SessionSnapshot) => void;
+  pushLiveSignal: (s: LiveSignalSample) => void;
+  saveBacktest: (r: BacktestResult) => void;
 }
 
 export const useSession = create<State>((set, get) => ({
   wallSettings: { ...DEFAULT_WALL_SETTINGS },
   alertSettings: { ...DEFAULT_ALERT_SETTINGS },
   quality: { blockOnLowQuality: false, minAcceptableScore: 55, bySymbol: {} },
+  qualityAlert: { ...DEFAULT_QUALITY_ALERT },
   alerts: [],
   unreadAlerts: 0,
   snapshot: null,
   lastAlertKey: {},
   qualityHistory: {},
+  liveSignalLog: {},
+  lastBacktest: null,
+  previousBacktest: null,
 
   setWallSettings: (s) =>
     set((st) => ({ wallSettings: { ...st.wallSettings, ...s } })),

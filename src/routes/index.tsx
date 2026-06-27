@@ -185,7 +185,9 @@ function SymbolView({
   const alertSettings = useSession((s) => s.alertSettings);
   const pushAlert = useSession((s) => s.pushAlert);
   const saveSnapshot = useSession((s) => s.saveSnapshot);
+  const pushLiveSignal = useSession((s) => s.pushLiveSignal);
   const blockDecision = useQualityBlockDecision(symbol);
+  useQualitySlopeAlert(symbol);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
 

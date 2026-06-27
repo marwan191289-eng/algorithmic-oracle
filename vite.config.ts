@@ -19,5 +19,8 @@ export default defineConfig({
       strictPort: true,
       allowedHosts: true,
     },
+    optimizeDeps: {
+      exclude: ["@tensorflow/tfjs-node", "tfjs-node", "tensorflow"],
+    },
   },
 });

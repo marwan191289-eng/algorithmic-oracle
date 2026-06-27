@@ -10,12 +10,18 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ReportRouteImport } from './routes/report'
+import { Route as CompareRouteImport } from './routes/compare'
 import { Route as BacktestRouteImport } from './routes/backtest'
 import { Route as IndexRouteImport } from './routes/index'
 
 const ReportRoute = ReportRouteImport.update({
   id: '/report',
   path: '/report',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CompareRoute = CompareRouteImport.update({
+  id: '/compare',
+  path: '/compare',
   getParentRoute: () => rootRouteImport,
 } as any)
 const BacktestRoute = BacktestRouteImport.update({
@@ -32,30 +38,34 @@ const IndexRoute = IndexRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/backtest': typeof BacktestRoute
+  '/compare': typeof CompareRoute
   '/report': typeof ReportRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/backtest': typeof BacktestRoute
+  '/compare': typeof CompareRoute
   '/report': typeof ReportRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/backtest': typeof BacktestRoute
+  '/compare': typeof CompareRoute
   '/report': typeof ReportRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/backtest' | '/report'
+  fullPaths: '/' | '/backtest' | '/compare' | '/report'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/backtest' | '/report'
-  id: '__root__' | '/' | '/backtest' | '/report'
+  to: '/' | '/backtest' | '/compare' | '/report'
+  id: '__root__' | '/' | '/backtest' | '/compare' | '/report'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   BacktestRoute: typeof BacktestRoute
+  CompareRoute: typeof CompareRoute
   ReportRoute: typeof ReportRoute
 }
 
@@ -66,6 +76,13 @@ declare module '@tanstack/react-router' {
       path: '/report'
       fullPath: '/report'
       preLoaderRoute: typeof ReportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/compare': {
+      id: '/compare'
+      path: '/compare'
+      fullPath: '/compare'
+      preLoaderRoute: typeof CompareRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/backtest': {
@@ -88,6 +105,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   BacktestRoute: BacktestRoute,
+  CompareRoute: CompareRoute,
   ReportRoute: ReportRoute,
 }
 export const routeTree = rootRouteImport

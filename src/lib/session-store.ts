@@ -11,6 +11,35 @@ import type {
   WallReport,
 } from "./analysis";
 import type { Interval, Ticker } from "./binance";
+import type { BacktestResult } from "./backtest";
+
+// ─── Live signal log (for Live-vs-Backtest comparison) ───────────────────
+export interface LiveSignalSample {
+  t: number;
+  symbol: string;
+  interval: string;
+  score: number;
+  side: "long" | "short" | "none";
+  confidence: number;
+  mid: number;
+}
+export const LIVE_LOG_MAX = 1000;
+
+// ─── Quality alert config (slope-based, with confirmation duration) ──────
+export interface QualityAlertConfig {
+  enabled: boolean;
+  slopePerMin: number;     // trigger when slope ≤ −this for confirmSec
+  scoreFloor: number;      // require recent avg below this
+  confirmSec: number;      // sustained duration before notifying
+  cooldownSec: number;
+}
+export const DEFAULT_QUALITY_ALERT: QualityAlertConfig = {
+  enabled: true,
+  slopePerMin: 1.5,
+  scoreFloor: 70,
+  confirmSec: 30,
+  cooldownSec: 120,
+};
 
 // ─── Wall detection settings ─────────────────────────────────────────────
 export type WallMethod = "zscore" | "percentile" | "absolute";

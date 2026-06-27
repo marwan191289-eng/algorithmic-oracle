@@ -295,4 +295,15 @@ export const useSession = create<State>((set, get) => ({
   clearAlerts: () => set({ alerts: [], unreadAlerts: 0, lastAlertKey: {} }),
   markAlertsRead: () => set({ unreadAlerts: 0 }),
   saveSnapshot: (s) => set({ snapshot: s }),
+  setQualityAlert: (s) =>
+    set((st) => ({ qualityAlert: { ...st.qualityAlert, ...s } })),
+  pushLiveSignal: (s) =>
+    set((st) => {
+      const prev = st.liveSignalLog[s.symbol] ?? [];
+      const next = [...prev, s];
+      if (next.length > LIVE_LOG_MAX) next.splice(0, next.length - LIVE_LOG_MAX);
+      return { liveSignalLog: { ...st.liveSignalLog, [s.symbol]: next } };
+    }),
+  saveBacktest: (r) =>
+    set((st) => ({ previousBacktest: st.lastBacktest, lastBacktest: r })),
 }));

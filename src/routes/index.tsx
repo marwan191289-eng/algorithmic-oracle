@@ -29,9 +29,11 @@ import { QualityHistoryChart, useQualityBlockDecision } from "@/components/tradi
 import { WallSettingsPanel } from "@/components/trading/WallSettingsPanel";
 import { AlertSettingsPanel } from "@/components/trading/AlertSettingsPanel";
 import { AlertsCenter } from "@/components/trading/AlertsCenter";
+import { QualityAlertPanel } from "@/components/trading/QualityAlertPanel";
+import { useQualitySlopeAlert } from "@/hooks/useQualitySlopeAlert";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -95,6 +97,7 @@ function Dashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <WallSettingsPanel />
             <AlertSettingsPanel />
+            <div className="lg:col-span-2"><QualityAlertPanel /></div>
           </div>
         )}
 
@@ -132,6 +135,12 @@ function Header() {
             className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
           >
             <FlaskConical className="size-3.5" /> Backtest
+          </Link>
+          <Link
+            to="/compare"
+            className="text-[11px] mono px-2.5 py-1.5 rounded-md border border-border bg-card/60 hover:bg-card flex items-center gap-1.5"
+          >
+            <GitCompare className="size-3.5" /> Live vs Backtest
           </Link>
           <Link
             to="/report"
@@ -176,7 +185,9 @@ function SymbolView({
   const alertSettings = useSession((s) => s.alertSettings);
   const pushAlert = useSession((s) => s.pushAlert);
   const saveSnapshot = useSession((s) => s.saveSnapshot);
+  const pushLiveSignal = useSession((s) => s.pushLiveSignal);
   const blockDecision = useQualityBlockDecision(symbol);
+  useQualitySlopeAlert(symbol);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
 
@@ -285,6 +296,22 @@ function SymbolView({
       chartImage: null,
     });
   }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality, saveSnapshot]);
+
+  // ─── Log live signal for Live-vs-Backtest comparison ──────────────────
+  const lastLogRef = useRef(0);
+  useEffect(() => {
+    if (!verdict || !metrics) return;
+    const now = Date.now();
+    if (now - lastLogRef.current < 5000) return; // ≥5s spacing
+    lastLogRef.current = now;
+    pushLiveSignal({
+      t: now, symbol, interval,
+      score: verdict.score,
+      side: (verdict as any).targets?.side ?? "none",
+      confidence: (verdict as any).confidence ?? 0,
+      mid: metrics.mid,
+    });
+  }, [verdict, metrics, symbol, interval, pushLiveSignal]);
 
   if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
   const qScore = quality?.score ?? 100;
@@ -410,28 +437,32 @@ function SymbolView({
 
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <Panel
-              icon={<Crosshair className="size-4 text-primary" />}
-              title="الجدران السعرية (دعوم ومقاومات)"
-              extra={
-                <span className="text-[10px] mono text-muted-foreground">
-                  {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
-                  {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
-                  {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
-                  {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
-                </span>
-              }
-            >
-              {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
-            </Panel>
+            <div id="walls-panel" className="scroll-mt-24">
+              <Panel
+                icon={<Crosshair className="size-4 text-primary" />}
+                title="الجدران السعرية (دعوم ومقاومات)"
+                extra={
+                  <span className="text-[10px] mono text-muted-foreground">
+                    {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
+                    {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
+                    {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
+                    {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
+                  </span>
+                }
+              >
+                {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
+              </Panel>
+            </div>
 
-            <Panel
-              icon={<Crosshair className="size-4 text-gold" />}
-              title="مناطق صيد الستوبات (السيولة)"
-              extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
-            >
-              <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
-            </Panel>
+            <div id="zones-panel" className="scroll-mt-24">
+              <Panel
+                icon={<Crosshair className="size-4 text-gold" />}
+                title="مناطق صيد الستوبات (السيولة)"
+                extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
+              >
+                <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
+              </Panel>
+            </div>
           </div>
         </>
       )}

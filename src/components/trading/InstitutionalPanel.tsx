@@ -2,6 +2,7 @@ import type { InstitutionalVerdict, InstitutionalVerdictV2 } from "@/lib/analysi
 import { cn } from "@/lib/utils";
 import { Brain, Activity, Waves, Fish, Target, ShieldAlert } from "lucide-react";
 import { fmtPrice } from "@/lib/binance";
+import { ScoreBreakdown } from "./ScoreBreakdown";
 
 const BIAS_COLORS: Record<InstitutionalVerdict["bias"], string> = {
   "strong-bull": "text-bull glow-bull border-bull/40",
@@ -142,6 +143,8 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
           unsigned
         />
       </div>
+
+      {hasV2 && <ScoreBreakdown v={v2} />}
 
       {/* Reasoning */}
       <div className="rounded-xl border border-border bg-secondary/30 p-3 space-y-1.5">

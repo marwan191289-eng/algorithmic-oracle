@@ -11,6 +11,35 @@ import type {
   WallReport,
 } from "./analysis";
 import type { Interval, Ticker } from "./binance";
+import type { BacktestResult } from "./backtest";
+
+// ─── Live signal log (for Live-vs-Backtest comparison) ───────────────────
+export interface LiveSignalSample {
+  t: number;
+  symbol: string;
+  interval: string;
+  score: number;
+  side: "long" | "short" | "none";
+  confidence: number;
+  mid: number;
+}
+export const LIVE_LOG_MAX = 1000;
+
+// ─── Quality alert config (slope-based, with confirmation duration) ──────
+export interface QualityAlertConfig {
+  enabled: boolean;
+  slopePerMin: number;     // trigger when slope ≤ −this for confirmSec
+  scoreFloor: number;      // require recent avg below this
+  confirmSec: number;      // sustained duration before notifying
+  cooldownSec: number;
+}
+export const DEFAULT_QUALITY_ALERT: QualityAlertConfig = {
+  enabled: true,
+  slopePerMin: 1.5,
+  scoreFloor: 70,
+  confirmSec: 30,
+  cooldownSec: 120,
+};
 
 // ─── Wall detection settings ─────────────────────────────────────────────
 export type WallMethod = "zscore" | "percentile" | "absolute";
@@ -119,14 +148,19 @@ interface State {
   alertSettings: AlertSettings;
   quality: QualityState;
   qualityHistory: Record<string, QualitySample[]>;
+  qualityAlert: QualityAlertConfig;
   alerts: AlertItem[];
   unreadAlerts: number;
   snapshot: SessionSnapshot | null;
-  lastAlertKey: Record<string, number>; // anti-spam
+  lastAlertKey: Record<string, number>;
+  liveSignalLog: Record<string, LiveSignalSample[]>;
+  lastBacktest: BacktestResult | null;
+  previousBacktest: BacktestResult | null;
 
   setWallSettings: (s: Partial<WallSettings>) => void;
   resetWallSettings: () => void;
   setAlertSettings: (s: Partial<AlertSettings>) => void;
+  setQualityAlert: (s: Partial<QualityAlertConfig>) => void;
   setBlockOnLowQuality: (v: boolean) => void;
   setMinAcceptableScore: (v: number) => void;
   updateQuality: (symbol: string, patch: Partial<QualityMetrics>) => void;
@@ -135,17 +169,23 @@ interface State {
   clearAlerts: () => void;
   markAlertsRead: () => void;
   saveSnapshot: (s: SessionSnapshot) => void;
+  pushLiveSignal: (s: LiveSignalSample) => void;
+  saveBacktest: (r: BacktestResult) => void;
 }
 
 export const useSession = create<State>((set, get) => ({
   wallSettings: { ...DEFAULT_WALL_SETTINGS },
   alertSettings: { ...DEFAULT_ALERT_SETTINGS },
   quality: { blockOnLowQuality: false, minAcceptableScore: 55, bySymbol: {} },
+  qualityAlert: { ...DEFAULT_QUALITY_ALERT },
   alerts: [],
   unreadAlerts: 0,
   snapshot: null,
   lastAlertKey: {},
   qualityHistory: {},
+  liveSignalLog: {},
+  lastBacktest: null,
+  previousBacktest: null,
 
   setWallSettings: (s) =>
     set((st) => ({ wallSettings: { ...st.wallSettings, ...s } })),
@@ -255,4 +295,15 @@ export const useSession = create<State>((set, get) => ({
   clearAlerts: () => set({ alerts: [], unreadAlerts: 0, lastAlertKey: {} }),
   markAlertsRead: () => set({ unreadAlerts: 0 }),
   saveSnapshot: (s) => set({ snapshot: s }),
+  setQualityAlert: (s) =>
+    set((st) => ({ qualityAlert: { ...st.qualityAlert, ...s } })),
+  pushLiveSignal: (s) =>
+    set((st) => {
+      const prev = st.liveSignalLog[s.symbol] ?? [];
+      const next = [...prev, s];
+      if (next.length > LIVE_LOG_MAX) next.splice(0, next.length - LIVE_LOG_MAX);
+      return { liveSignalLog: { ...st.liveSignalLog, [s.symbol]: next } };
+    }),
+  saveBacktest: (r) =>
+    set((st) => ({ previousBacktest: st.lastBacktest, lastBacktest: r })),
 }));

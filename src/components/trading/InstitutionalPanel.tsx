@@ -144,6 +144,8 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
         />
       </div>
 
+      {hasV2 && <ScoreBreakdown v={v2} />}
+
       {/* Reasoning */}
       <div className="rounded-xl border border-border bg-secondary/30 p-3 space-y-1.5">
         <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted-foreground">

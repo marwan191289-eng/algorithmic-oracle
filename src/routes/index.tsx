@@ -29,9 +29,11 @@ import { QualityHistoryChart, useQualityBlockDecision } from "@/components/tradi
 import { WallSettingsPanel } from "@/components/trading/WallSettingsPanel";
 import { AlertSettingsPanel } from "@/components/trading/AlertSettingsPanel";
 import { AlertsCenter } from "@/components/trading/AlertsCenter";
+import { QualityAlertPanel } from "@/components/trading/QualityAlertPanel";
+import { useQualitySlopeAlert } from "@/hooks/useQualitySlopeAlert";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({

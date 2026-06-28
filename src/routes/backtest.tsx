@@ -285,28 +285,65 @@ function ResultView({ r, prev }: { r: BacktestResult; prev: BacktestResult | nul
         </div>
       </div>
 
-      {/* KPIs */}
+      {/* KPIs — Row 1: core */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
         <Kpi label="الصفقات" value={`${r.trades.length}`} delta={prev ? r.trades.length - prev.trades.length : null} />
-        <Kpi label="الرابحة/الخاسرة" value={`${r.wins} / ${r.losses}`} />
-        <Kpi label="نسبة الفوز" value={`${r.winRate.toFixed(1)}%`}
+        <Kpi label="رابحة ✓ / خاسرة ✗" value={`${r.wins} / ${r.losses}`} />
+        <Kpi label="نسبة الفوز"
+             value={`${r.winRate.toFixed(1)}%`}
              tone={r.winRate >= 55 ? "ok" : r.winRate >= 45 ? "warn" : "bad"}
              delta={prev ? r.winRate - prev.winRate : null} suffix="%" />
-        <Kpi label="إجمالي العائد" value={`${pos ? "+" : ""}${r.totalReturnPct.toFixed(2)}%`}
+        <Kpi label="إجمالي العائد"
+             value={`${pos ? "+" : ""}${r.totalReturnPct.toFixed(2)}%`}
              tone={pos ? "ok" : "bad"}
              delta={prev ? r.totalReturnPct - prev.totalReturnPct : null} suffix="%" />
-        <Kpi label="متوسط الصفقة" value={`${r.avgTradePct >= 0 ? "+" : ""}${r.avgTradePct.toFixed(2)}%`}
+        <Kpi label="متوسط الصفقة"
+             value={`${r.avgTradePct >= 0 ? "+" : ""}${r.avgTradePct.toFixed(2)}%`}
              tone={r.avgTradePct >= 0 ? "ok" : "bad"}
              delta={prev ? r.avgTradePct - prev.avgTradePct : null} suffix="%" />
-        <Kpi label="معامل الربح" value={isFinite(r.profitFactor) ? r.profitFactor.toFixed(2) : "∞"}
+        <Kpi label="معامل الربح"
+             value={isFinite(r.profitFactor) ? r.profitFactor.toFixed(2) : "∞"}
              tone={r.profitFactor >= 1.3 ? "ok" : r.profitFactor >= 1 ? "warn" : "bad"}
              delta={prev && isFinite(r.profitFactor) && isFinite(prev.profitFactor) ? r.profitFactor - prev.profitFactor : null} />
-        <Kpi label="أقصى تراجع" value={`-${r.maxDrawdownPct.toFixed(2)}%`}
+        <Kpi label="أقصى تراجع"
+             value={`-${r.maxDrawdownPct.toFixed(2)}%`}
              tone={r.maxDrawdownPct <= 10 ? "ok" : r.maxDrawdownPct <= 20 ? "warn" : "bad"}
              delta={prev ? prev.maxDrawdownPct - r.maxDrawdownPct : null} suffix="%" />
-        <Kpi label="التوقع/صفقة" value={`${r.expectancy >= 0 ? "+" : ""}${r.expectancy.toFixed(3)}%`}
+        <Kpi label="التوقع/صفقة"
+             value={`${r.expectancy >= 0 ? "+" : ""}${r.expectancy.toFixed(3)}%`}
              tone={r.expectancy >= 0 ? "ok" : "bad"}
              delta={prev ? r.expectancy - prev.expectancy : null} suffix="%" />
+      </div>
+
+      {/* KPIs — Row 2: risk-adjusted ratios */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
+        <Kpi label="Sharpe Ratio"
+             value={r.sharpeRatio.toFixed(2)}
+             tone={r.sharpeRatio >= 1.5 ? "ok" : r.sharpeRatio >= 0.8 ? "warn" : "bad"}
+             delta={prev ? r.sharpeRatio - prev.sharpeRatio : null} />
+        <Kpi label="Sortino Ratio"
+             value={r.sortinoRatio.toFixed(2)}
+             tone={r.sortinoRatio >= 2 ? "ok" : r.sortinoRatio >= 1 ? "warn" : "bad"}
+             delta={prev ? r.sortinoRatio - prev.sortinoRatio : null} />
+        <Kpi label="Calmar Ratio"
+             value={r.calmarRatio.toFixed(2)}
+             tone={r.calmarRatio >= 0.5 ? "ok" : r.calmarRatio >= 0.2 ? "warn" : "bad"}
+             delta={prev ? r.calmarRatio - prev.calmarRatio : null} />
+        <Kpi label="WR Long / Short"
+             value={`${r.longWinRate.toFixed(0)}% / ${r.shortWinRate.toFixed(0)}%`}
+             tone={Math.min(r.longWinRate, r.shortWinRate) >= 50 ? "ok" : "warn"} />
+        <Kpi label="متوسط الاحتفاظ"
+             value={`${r.avgHoldBars.toFixed(1)} شمعة`}
+             tone="neutral" />
+        <Kpi label="أفضل / أسوأ"
+             value={`+${r.bestPct.toFixed(1)}% / ${r.worstPct.toFixed(1)}%`}
+             tone="neutral" />
+        <Kpi label="أطول سلسلة ربح"
+             value={`${r.maxConsecWins} تتالي`}
+             tone={r.maxConsecWins >= 5 ? "ok" : "neutral"} />
+        <Kpi label="أطول سلسلة خسارة"
+             value={`${r.maxConsecLosses} تتالي`}
+             tone={r.maxConsecLosses <= 3 ? "ok" : r.maxConsecLosses <= 6 ? "warn" : "bad"} />
       </div>
 
       {/* Equity curve */}

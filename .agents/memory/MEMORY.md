@@ -1,3 +1,4 @@
 - [Zustand action ref pattern](zustand-action-refs.md) — never put Zustand action selectors in useEffect deps; use useRef + getState() instead
 - [Analysis algorithm upgrades](analysis-algorithm.md) — proximity imbalance, log-vol momentum, Python-aligned confidence (60% agreement + 40% quality) all live in analysis.ts
-- [RL Agent panel pattern](rl-agent-panel.md) — RLAgentPanel is a self-contained rule-based PPO approximation; takes verdict + metrics props, manages its own active/log state
+- [RL Agent panel pattern](rl-agent-panel.md) — upgraded to 14-feature / 32-16-3 layers / REINFORCE with experience replay; weights update online via policyGradientUpdate
+- [Backtest engine v2](backtest-v2.md) — signalAt rewritten to use same weights as institutionalScoreV2; synthetic book from OHLCV; Sharpe/Sortino/Calmar/consecutive streaks added

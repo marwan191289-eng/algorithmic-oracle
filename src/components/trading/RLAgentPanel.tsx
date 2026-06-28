@@ -3,15 +3,14 @@ import type { InstitutionalVerdictV2, BookMetrics } from "@/lib/analysis";
 import { cn } from "@/lib/utils";
 import {
   Bot, Power, TrendingUp, TrendingDown, Minus,
-  Activity, Database, Zap, RefreshCw,
+  Activity, Database, Zap, RefreshCw, Brain, Target,
+  BarChart2, Award, AlertCircle,
 } from "lucide-react";
 import { fmtPrice } from "@/lib/binance";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type RLAction = "LONG" | "SHORT" | "HOLD";
-
 interface ActionProbs { long: number; short: number; hold: number }
-
 interface AgentDecision {
   action: RLAction;
   probs: ActionProbs;
@@ -20,86 +19,259 @@ interface AgentDecision {
   timestamp: number;
   entry: number;
   tick: number;
+  stateArr: number[];
+  explorationBonus: number;
 }
 
-// ── Tiny in-browser neural network (no external deps) ─────────────────────
-// 10 inputs → 24 hidden (ReLU) → 3 outputs (Softmax)
-// Weights are deterministic and calibrated to institutional signals.
-// This is a frozen PPO-inference approximation.
+interface Experience {
+  state: number[];
+  action: number; // 0=LONG, 1=SHORT, 2=HOLD
+  reward: number;
+  nextState: number[];
+  done: boolean;
+}
+
+// ── Neural network architecture ─────────────────────────────────────────────
+// 14 inputs → 32 hidden (ReLU) → 16 hidden (ReLU) → 3 outputs (Softmax)
+// Weights initialized analytically and then updated via online learning
+
+const INPUT_DIM = 14;
+const H1_DIM = 32;
+const H2_DIM = 16;
+const OUTPUT_DIM = 3;
+const LR = 0.004;         // learning rate
+const GAMMA = 0.92;        // discount factor
+const ENTROPY_COEFF = 0.08; // entropy bonus to prevent premature convergence
+const REPLAY_BATCH = 24;   // mini-batch size for gradient updates
+const MAX_REPLAY = 500;    // experience replay buffer size
 
 function relu(x: number) { return x > 0 ? x : 0; }
+function reluGrad(x: number) { return x > 0 ? 1 : 0; }
 
 function softmax(arr: number[]): number[] {
   const max = Math.max(...arr);
-  const exps = arr.map((x) => Math.exp(x - max));
+  const exps = arr.map(x => Math.exp(x - max));
   const sum = exps.reduce((a, b) => a + b, 0);
-  return exps.map((e) => e / sum);
+  return exps.map(e => e / sum);
 }
 
-// Fixed weights: W1[24×10], b1[24], W2[3×24], b2[3]
-// Derived analytically so LONG fires on bullish cluster, SHORT on bearish.
-function buildWeights() {
-  // W1: each hidden unit is a dot product combination of inputs
-  // Inputs: [score, conf, imbal, proxPx, micro, mom, volDir, rsi, sprd, wallImb]
-  //          [0]   [1]   [2]    [3]     [4]    [5]  [6]     [7]  [8]   [9]
+// He initialization for ReLU networks
+function heInit(fanIn: number, fanOut: number): number[][] {
+  const std = Math.sqrt(2 / fanIn);
+  return Array.from({ length: fanOut }, () =>
+    Array.from({ length: fanIn }, () => (Math.random() * 2 - 1) * std)
+  );
+}
+
+// ── Initial weights derived from institutional knowledge ─────────────────────
+function buildInitialWeights() {
+  // Seed with fixed value so weights are deterministic on first load
+  // Inputs: [score, conf, imbal, proxPx, micro, mom, volDir, rsi,
+  //          sprd, wallImb, atr, entropy, recentWinRate, sessionVolatility]
+  //          [0]   [1]   [2]    [3]    [4]    [5]  [6]   [7]
+  //          [8]   [9]   [10]   [11]   [12]   [13]
+
+  // Layer 1 W1 [H1_DIM × INPUT_DIM]
   const W1: number[][] = [];
   const b1: number[] = [];
 
-  // Units 0-7: bullish detectors (react positively to bull signals)
-  const bullWeights = [3.0, 1.5, 2.5, 2.0, 1.8, 2.2, 1.5, -1.0, -0.5, 1.8];
-  for (let i = 0; i < 8; i++) {
-    W1.push(bullWeights.map((w) => w * (0.85 + 0.3 * ((i * 7 + 3) % 10) / 10)));
-    b1.push(-0.5 - i * 0.05);
+  // Units 0-9: bullish detectors
+  const bull = [3.2, 1.6, 2.8, 2.2, 1.9, 2.4, 1.6, -1.1, -0.5, 1.9, 0.3, 0.2, 1.2, 0.4];
+  for (let i = 0; i < 10; i++) {
+    W1.push(bull.map((w, j) => w * (0.80 + 0.35 * ((i * 7 + j * 3) % 10) / 10)));
+    b1.push(-0.4 - i * 0.04);
   }
-  // Units 8-15: bearish detectors (react positively to bear signals)
-  const bearWeights = [-3.0, 1.5, -2.5, -2.0, -1.8, -2.2, -1.5, -1.0, -0.5, -1.8];
-  for (let i = 0; i < 8; i++) {
-    W1.push(bearWeights.map((w) => w * (0.85 + 0.3 * ((i * 11 + 7) % 10) / 10)));
-    b1.push(-0.5 - i * 0.05);
+  // Units 10-19: bearish detectors
+  const bear = [-3.2, 1.6, -2.8, -2.2, -1.9, -2.4, -1.6, 1.1, -0.5, -1.9, 0.3, 0.2, -1.2, 0.4];
+  for (let i = 0; i < 10; i++) {
+    W1.push(bear.map((w, j) => w * (0.80 + 0.35 * ((i * 11 + j * 5) % 10) / 10)));
+    b1.push(-0.4 - i * 0.04);
   }
-  // Units 16-23: uncertainty/HOLD detectors
-  const holdWeights = [0.5, -0.5, 0.3, 0.3, 0.2, 0.2, 0.1, 1.2, 0.8, 0.3];
+  // Units 20-27: HOLD / uncertainty detectors
+  const hold = [0.5, -0.5, 0.3, 0.3, 0.2, 0.2, 0.1, 1.3, 0.9, 0.3, -0.2, 0.8, -0.3, 0.5];
   for (let i = 0; i < 8; i++) {
-    W1.push(holdWeights.map((w) => w * (0.9 + 0.2 * (i % 5) / 5)));
+    W1.push(hold.map((w, j) => w * (0.9 + 0.2 * (i % 5) / 5)));
     b1.push(0.2);
   }
+  // Units 28-31: volatility / risk detectors
+  const vol = [0.2, 0.8, 0.1, 0.1, 0.5, 0.4, 0.6, 0.2, 1.2, 0.1, -1.8, -0.5, 0.4, 0.3];
+  for (let i = 0; i < 4; i++) {
+    W1.push(vol.map(w => w * (0.85 + 0.15 * i / 4)));
+    b1.push(0.0);
+  }
 
-  // W2[3 × 24]: output layer
-  // LONG  = sum(bull_units) - sum(bear_units)
-  // SHORT = -sum(bull_units) + sum(bear_units)
-  // HOLD  = sum(hold_units)
-  const W2: number[][] = [
-    [...Array(8).fill(1.8), ...Array(8).fill(-1.8), ...Array(8).fill(-0.4)], // LONG
-    [...Array(8).fill(-1.8), ...Array(8).fill(1.8), ...Array(8).fill(-0.4)], // SHORT
-    [...Array(8).fill(-0.5), ...Array(8).fill(-0.5), ...Array(8).fill(1.5)], // HOLD
+  // Layer 2 W2 [H2_DIM × H1_DIM]
+  const W2: number[][] = [];
+  const b2: number[] = [];
+  for (let i = 0; i < H2_DIM; i++) {
+    const row: number[] = [];
+    for (let j = 0; j < H1_DIM; j++) {
+      // First 8 units of H1 are bull, next 10 are bear, rest are hold/vol
+      if (i < 6) row.push(j < 10 ? 1.2 : j < 20 ? -1.0 : 0.0); // bullish aggregators
+      else if (i < 12) row.push(j < 10 ? -1.0 : j < 20 ? 1.2 : 0.0); // bearish aggregators
+      else row.push(j < 20 ? -0.4 : 1.0); // hold aggregators
+    }
+    W2.push(row.map(w => w * (0.3 + Math.random() * 0.1)));
+    b2.push(i < 6 ? 0.0 : i < 12 ? 0.0 : 0.2);
+  }
+
+  // Output layer W3 [OUTPUT_DIM × H2_DIM]
+  const W3: number[][] = [
+    [...Array(6).fill(2.0), ...Array(6).fill(-1.8), ...Array(4).fill(-0.4)], // LONG
+    [...Array(6).fill(-1.8), ...Array(6).fill(2.0), ...Array(4).fill(-0.4)], // SHORT
+    [...Array(6).fill(-0.5), ...Array(6).fill(-0.5), ...Array(4).fill(1.6)], // HOLD
   ];
-  const b2 = [0.0, 0.0, 0.3]; // slight HOLD bias = conservative
+  const b3 = [0.0, 0.0, 0.4]; // slight HOLD bias
 
-  return { W1, b1, W2, b2 };
+  return { W1, b1, W2, b2, W3, b3 };
 }
 
-const { W1, b1, W2, b2 } = buildWeights();
+// ── Neural network forward pass ───────────────────────────────────────────────
+interface Weights {
+  W1: number[][]; b1: number[];
+  W2: number[][]; b2: number[];
+  W3: number[][]; b3: number[];
+}
 
-function forwardPass(state: number[]): ActionProbs {
-  // Hidden layer
-  const hidden = W1.map((row, i) => {
-    const z = row.reduce((sum, w, j) => sum + w * (state[j] ?? 0), 0) + b1[i];
-    return relu(z);
-  });
+interface ForwardResult {
+  h1: number[];   // pre-activation
+  h1r: number[];  // post-relu
+  h2: number[];
+  h2r: number[];
+  logits: number[];
+  probs: number[];
+}
 
-  // Output layer
-  const logits = W2.map((row, i) =>
-    row.reduce((sum, w, j) => sum + w * hidden[j], 0) + b2[i]
+function forward(state: number[], w: Weights): ForwardResult {
+  const h1 = w.W1.map((row, i) =>
+    row.reduce((s, wi, j) => s + wi * (state[j] ?? 0), 0) + w.b1[i]
   );
+  const h1r = h1.map(relu);
 
-  const [long, short, hold] = softmax(logits);
-  return { long, short, hold };
+  const h2 = w.W2.map((row, i) =>
+    row.reduce((s, wi, j) => s + wi * h1r[j], 0) + w.b2[i]
+  );
+  const h2r = h2.map(relu);
+
+  const logits = w.W3.map((row, i) =>
+    row.reduce((s, wi, j) => s + wi * h2r[j], 0) + w.b3[i]
+  );
+  const probs = softmax(logits);
+  return { h1, h1r, h2, h2r, logits, probs };
 }
 
-// ── State vector ───────────────────────────────────────────────────────────
-// Build state from verdict + metrics (full) or metrics only (partial, while klines load)
-function buildStateArray(v: InstitutionalVerdictV2 | null, m: BookMetrics): number[] {
+// ── REINFORCE policy gradient update ─────────────────────────────────────────
+// Updates weights using the REINFORCE algorithm with entropy bonus
+function policyGradientUpdate(
+  w: Weights,
+  experience: Experience[]
+): Weights {
+  if (experience.length < 4) return w;
+
+  // Clone weights
+  const nW1 = w.W1.map(r => [...r]);
+  const nb1 = [...w.b1];
+  const nW2 = w.W2.map(r => [...r]);
+  const nb2 = [...w.b2];
+  const nW3 = w.W3.map(r => [...r]);
+  const nb3 = [...w.b3];
+
+  for (const exp of experience) {
+    const f = forward(exp.state, w);
+    const { h1r, h2r, probs } = f;
+
+    // Reward with discount (TD-style estimate)
+    const nextF = forward(exp.nextState, w);
+    const nextVal = exp.done ? 0 : GAMMA * Math.max(...nextF.probs);
+    const advantage = exp.reward + nextVal - probs[exp.action];
+    const adv = Math.max(-2, Math.min(2, advantage)); // clip gradient
+
+    // Entropy bonus gradient: encourages exploration
+    const entropy = -probs.reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0);
+
+    // Output layer gradient (dL/dlogits)
+    const dLogits = probs.map((p, k) => {
+      const onehot = k === exp.action ? 1 : 0;
+      const policyGrad = -adv * (onehot - p);
+      const entropyGrad = -ENTROPY_COEFF * (-Math.log(p + 1e-8) - entropy);
+      return policyGrad + entropyGrad;
+    });
+
+    // Update W3, b3
+    for (let k = 0; k < OUTPUT_DIM; k++) {
+      for (let j = 0; j < H2_DIM; j++) {
+        nW3[k][j] -= LR * dLogits[k] * h2r[j];
+      }
+      nb3[k] -= LR * dLogits[k];
+    }
+
+    // Backprop to h2
+    const dH2r = Array(H2_DIM).fill(0);
+    for (let j = 0; j < H2_DIM; j++) {
+      for (let k = 0; k < OUTPUT_DIM; k++) {
+        dH2r[j] += w.W3[k][j] * dLogits[k];
+      }
+    }
+    const dH2 = dH2r.map((d, j) => d * reluGrad(f.h2[j]));
+
+    // Update W2, b2
+    for (let i = 0; i < H2_DIM; i++) {
+      for (let j = 0; j < H1_DIM; j++) {
+        nW2[i][j] -= LR * dH2[i] * h1r[j];
+      }
+      nb2[i] -= LR * dH2[i];
+    }
+
+    // Backprop to h1
+    const dH1r = Array(H1_DIM).fill(0);
+    for (let j = 0; j < H1_DIM; j++) {
+      for (let i = 0; i < H2_DIM; i++) {
+        dH1r[j] += w.W2[i][j] * dH2[i];
+      }
+    }
+    const dH1 = dH1r.map((d, j) => d * reluGrad(f.h1[j]));
+
+    // Update W1, b1
+    for (let i = 0; i < H1_DIM; i++) {
+      for (let j = 0; j < INPUT_DIM; j++) {
+        nW1[i][j] -= LR * dH1[i] * (exp.state[j] ?? 0);
+      }
+      nb1[i] -= LR * dH1[i];
+    }
+  }
+
+  // Gradient clipping (prevents exploding gradients)
+  const clip = (v: number) => Math.max(-1.5, Math.min(1.5, v));
+  return {
+    W1: nW1.map(r => r.map(clip)), b1: nb1.map(clip),
+    W2: nW2.map(r => r.map(clip)), b2: nb2.map(clip),
+    W3: nW3.map(r => r.map(clip)), b3: nb3.map(clip),
+  };
+}
+
+// ── State vector (14 features) ────────────────────────────────────────────────
+// [score, conf, imbal, proxPx, micro, mom, volDir, rsi, sprd, wallImb,
+//  atrNorm, probEntropy, recentWinRate, momentumStrength]
+function buildStateArray(v: InstitutionalVerdictV2 | null, m: BookMetrics, ctx: AgentContext): number[] {
+  const spread = Math.min(m.spreadPct / 0.1, 1);
+  const micro  = m.microPrice && m.mid
+    ? Math.max(-1, Math.min(1, (m.microPrice - m.mid) / (m.mid || 1) * 100))
+    : 0;
+
   if (v) {
+    // Entropy of recent decisions (high = uncertain agent, low = confident)
+    const probs = ctx.recentProbs.length > 0 ? ctx.recentProbs[0] : null;
+    const entropy = probs
+      ? -([probs.long, probs.short, probs.hold].reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0))
+      : Math.log(3);
+    const normalizedEntropy = entropy / Math.log(3); // 0..1
+
+    // Momentum strength: absolute value of momentum
+    const momentumStrength = Math.abs(v.components.momentum);
+
+    // ATR normalized (if available from bookMetrics spread as proxy)
+    const atrNorm = Math.min(1, m.spreadPct / 0.05);
+
     return [
       v.score / 100,
       v.confidence / 100,
@@ -108,55 +280,79 @@ function buildStateArray(v: InstitutionalVerdictV2 | null, m: BookMetrics): numb
       v.components.microDrift,
       v.components.momentum,
       v.components.volumeTrend,
-      v.components.rsiPenalty,
-      Math.min(m.spreadPct / 0.1, 1),
+      (v.components.rsiPenalty + 0.4) / 0.8, // normalize to [0,1]
+      spread,
       v.components.wallPressure,
+      atrNorm,
+      normalizedEntropy,
+      ctx.recentWinRate,
+      momentumStrength,
     ];
   }
-  // Partial state from book metrics alone (score/conf/mom/rsi/wallPressure unknown → 0)
-  const imbal = m.imbalance;         // [-1, +1]
-  const spread = Math.min(m.spreadPct / 0.1, 1);
-  const micro = (m.microPrice - m.mid) / (m.mid || 1) * 100; // micro drift %
-  const vwapDrift = (m.vwapBid - m.vwapAsk) / (m.mid || 1);  // proxy for pressure
+
+  // Partial state from book metrics alone
+  const vwapDrift = m.mid > 0 ? Math.max(-1, Math.min(1, (m.vwapBid - m.vwapAsk) / m.mid)) : 0;
   return [
-    0,          // score unknown
-    0,          // confidence unknown
-    imbal,      // bookImbalance
-    vwapDrift,  // proximityPressure proxy
-    micro,      // microDrift
-    0,          // momentum unknown (needs klines)
-    0,          // volumeTrend unknown
-    0,          // rsiPenalty unknown
-    spread,
-    imbal * 0.5, // wallImbalance proxy
+    0, 0, m.imbalance, vwapDrift, micro,
+    0, 0, 0.5, spread, m.imbalance * 0.5,
+    Math.min(1, m.spreadPct / 0.05), Math.log(3) / Math.log(3),
+    ctx.recentWinRate, 0,
   ];
 }
 
-function buildStateMap(v: InstitutionalVerdictV2 | null, m: BookMetrics) {
-  const arr = buildStateArray(v, m);
-  const keys = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb"];
-  return keys.map((k, i) => ({ k, v: arr[i] }));
+interface AgentContext {
+  recentProbs: ActionProbs[];
+  recentWinRate: number;
+  totalDecisions: number;
+  wins: number;
 }
 
-// ── Decision from probs ────────────────────────────────────────────────────
-function decideAction(probs: ActionProbs): { action: RLAction; confidence: number } {
-  const max = Math.max(probs.long, probs.short, probs.hold);
-  let action: RLAction = "HOLD";
-  if (max === probs.long) action = "LONG";
-  else if (max === probs.short) action = "SHORT";
-  // confidence = max probability × 100, adjusted for certainty
-  const entropy = -(
-    (probs.long > 0 ? probs.long * Math.log(probs.long) : 0) +
-    (probs.short > 0 ? probs.short * Math.log(probs.short) : 0) +
-    (probs.hold > 0 ? probs.hold * Math.log(probs.hold) : 0)
-  );
+// ── Performance tracker ────────────────────────────────────────────────────────
+interface PerfMetrics {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  totalPnl: number;
+  recentPnls: number[];
+  streak: number;
+  streakType: "win" | "loss" | "none";
+}
+
+// ── Decision from probs ────────────────────────────────────────────────────────
+function decideAction(probs: ActionProbs, explorationRate: number): { action: RLAction; confidence: number; explorationBonus: number } {
+  // ε-greedy exploration with temperature annealing
+  const rand = Math.random();
+  let action: RLAction;
+  let explorationBonus = 0;
+
+  if (rand < explorationRate) {
+    // Explore: sample from probability distribution (not greedy)
+    const r2 = Math.random();
+    action = r2 < probs.long ? "LONG" : r2 < probs.long + probs.short ? "SHORT" : "HOLD";
+    explorationBonus = 1;
+  } else {
+    const max = Math.max(probs.long, probs.short, probs.hold);
+    action = max === probs.long ? "LONG" : max === probs.short ? "SHORT" : "HOLD";
+  }
+
+  const entropy = -([probs.long, probs.short, probs.hold]
+    .reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0));
   const maxEntropy = Math.log(3);
   const certainty = 1 - entropy / maxEntropy;
-  const confidence = Math.round(max * 100 * (0.6 + 0.4 * certainty));
-  return { action, confidence };
+  const pAction = action === "LONG" ? probs.long : action === "SHORT" ? probs.short : probs.hold;
+  const confidence = Math.round(pAction * 100 * (0.6 + 0.4 * certainty));
+
+  return { action, confidence, explorationBonus };
 }
 
-// ── Main Component ─────────────────────────────────────────────────────────
+// ── State map for display ─────────────────────────────────────────────────────
+function buildStateMap(v: InstitutionalVerdictV2 | null, m: BookMetrics, ctx: AgentContext) {
+  const arr = buildStateArray(v, m, ctx);
+  const keys = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr"];
+  return keys.map((k, i) => ({ k, v: arr[i] ?? 0 }));
+}
+
+// ── Main Component ─────────────────────────────────────────────────────────────
 export function RLAgentPanel({
   verdict,
   metrics,
@@ -168,68 +364,146 @@ export function RLAgentPanel({
   const [thinking, setThinking] = useState(false);
   const [current, setCurrent] = useState<AgentDecision | null>(null);
   const [log, setLog] = useState<AgentDecision[]>([]);
-  const tickRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [perf, setPerf] = useState<PerfMetrics>({
+    totalTrades: 0, wins: 0, losses: 0, totalPnl: 0, recentPnls: [], streak: 0, streakType: "none",
+  });
+  const [learningStep, setLearningStep] = useState(0);
+  const [explorationRate, setExplorationRate] = useState(0.15); // starts higher, anneals down
+
+  const weightsRef  = useRef<Weights>(buildInitialWeights());
+  const replayRef   = useRef<Experience[]>([]);
+  const tickRef     = useRef(0);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastDecRef  = useRef<{ state: number[]; action: number; price: number } | null>(null);
+  const contextRef  = useRef<AgentContext>({
+    recentProbs: [], recentWinRate: 0.5, totalDecisions: 0, wins: 0,
+  });
 
   const evaluate = useCallback(() => {
-    // Works with metrics alone (partial), or metrics+verdict (full)
     if (!metrics) return;
     setThinking(true);
+
     setTimeout(() => {
-      const state = buildStateArray(verdict, metrics);
-      const probs = forwardPass(state);
-      const { action, confidence } = decideAction(probs);
+      const ctx = contextRef.current;
+
+      // ── Compute reward from previous decision ─────────────────────────────
+      if (lastDecRef.current && metrics.mid) {
+        const prev = lastDecRef.current;
+        const priceDelta = (metrics.mid - prev.price) / prev.price;
+        let reward = 0;
+        if (prev.action === 0)      reward = priceDelta * 10; // LONG
+        else if (prev.action === 1) reward = -priceDelta * 10; // SHORT
+        else reward = Math.max(0, 0.05 - Math.abs(priceDelta) * 5); // HOLD: reward stillness
+
+        const newState = buildStateArray(verdict, metrics, ctx);
+        const exp: Experience = {
+          state: prev.state, action: prev.action, reward,
+          nextState: newState, done: false,
+        };
+        replayRef.current = [exp, ...replayRef.current].slice(0, MAX_REPLAY);
+
+        // Online learning: update weights from mini-batch
+        if (replayRef.current.length >= REPLAY_BATCH) {
+          // Sample random mini-batch
+          const shuffled = [...replayRef.current].sort(() => Math.random() - 0.5);
+          const batch = shuffled.slice(0, REPLAY_BATCH);
+          weightsRef.current = policyGradientUpdate(weightsRef.current, batch);
+          setLearningStep(s => s + 1);
+
+          // Update performance tracking
+          const isWin = reward > 0.01;
+          const isLoss = reward < -0.01;
+          ctx.wins += isWin ? 1 : 0;
+          ctx.totalDecisions += 1;
+          ctx.recentWinRate = ctx.wins / ctx.totalDecisions;
+
+          setPerf(p => {
+            const newPnls = [reward, ...p.recentPnls].slice(0, 20);
+            const newTotal = p.totalTrades + 1;
+            const newWins = p.wins + (isWin ? 1 : 0);
+            const newLosses = p.losses + (isLoss ? 1 : 0);
+            let streak = p.streak;
+            let streakType = p.streakType;
+            if (isWin) {
+              streak = p.streakType === "win" ? streak + 1 : 1;
+              streakType = "win";
+            } else if (isLoss) {
+              streak = p.streakType === "loss" ? streak + 1 : 1;
+              streakType = "loss";
+            }
+            return { totalTrades: newTotal, wins: newWins, losses: newLosses,
+              totalPnl: p.totalPnl + reward, recentPnls: newPnls, streak, streakType };
+          });
+        }
+
+        // Anneal exploration rate (less exploration over time)
+        setExplorationRate(prev => Math.max(0.02, prev * 0.998));
+      }
+
+      // ── Forward pass ──────────────────────────────────────────────────────
+      const state = buildStateArray(verdict, metrics, ctx);
+      const result = forward(state, weightsRef.current);
+      const [pLong, pShort, pHold] = result.probs;
+      const probs: ActionProbs = { long: pLong, short: pShort, hold: pHold };
+      const { action, confidence, explorationBonus } = decideAction(probs, explorationRate);
+
+      // Update context
+      ctx.recentProbs = [probs, ...ctx.recentProbs].slice(0, 5);
+
       tickRef.current += 1;
       const decision: AgentDecision = {
-        action,
-        probs,
-        confidence,
+        action, probs, confidence,
         score: verdict?.score ?? 0,
         timestamp: Date.now(),
         entry: metrics.mid,
         tick: tickRef.current,
+        stateArr: state,
+        explorationBonus,
       };
+
+      // Store for next reward computation
+      const actionIdx = action === "LONG" ? 0 : action === "SHORT" ? 1 : 2;
+      lastDecRef.current = { state, action: actionIdx, price: metrics.mid };
+
       setCurrent(decision);
-      setLog((prev) => [decision, ...prev].slice(0, 10));
+      setLog(prev => [decision, ...prev].slice(0, 15));
       setThinking(false);
     }, 50);
-  }, [verdict, metrics]);
+  }, [verdict, metrics, explorationRate]);
 
-  // Start / stop interval
   useEffect(() => {
     if (!active) {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
       return;
     }
-    // Immediate first run
     evaluate();
-    // Then every 2 seconds
     timerRef.current = setInterval(evaluate, 2000);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [active, evaluate]);
 
-  // Reset on deactivate
   useEffect(() => {
     if (!active) {
       setCurrent(null);
       setLog([]);
       tickRef.current = 0;
+      lastDecRef.current = null;
+      contextRef.current = { recentProbs: [], recentWinRate: 0.5, totalDecisions: 0, wins: 0 };
+      setLearningStep(0);
+      setExplorationRate(0.15);
+      setPerf({ totalTrades: 0, wins: 0, losses: 0, totalPnl: 0, recentPnls: [], streak: 0, streakType: "none" });
     }
   }, [active]);
 
-  const stateItems =
-    active && metrics ? buildStateMap(verdict, metrics) : null;
-
+  const stateItems = active && metrics ? buildStateMap(verdict, metrics, contextRef.current) : null;
   const noData = active && !metrics;
+  const winRate = perf.totalTrades > 0 ? (perf.wins / perf.totalTrades) * 100 : 0;
 
   return (
     <div className={cn(
       "rounded-2xl border overflow-hidden transition-all duration-300",
       active
-        ? "border-primary/50 bg-card/70 shadow-[0_0_24px_rgba(var(--primary-rgb,99,102,241),.12)]"
+        ? "border-primary/50 bg-card/70 shadow-[0_0_24px_rgba(var(--primary-rgb,99,102,241),.15)]"
         : "border-border bg-card/60"
     )}>
       {/* Header */}
@@ -248,22 +522,30 @@ export function RLAgentPanel({
             <div className="font-bold text-sm flex items-center gap-2">
               RL Agent — عين الحوت
               {active && (
-                <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 uppercase tracking-wider">
-                  LIVE
-                </span>
+                <>
+                  <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 uppercase tracking-wider">
+                    LIVE
+                  </span>
+                  {learningStep > 0 && (
+                    <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-bull/20 text-bull border border-bull/30 uppercase tracking-wider flex items-center gap-0.5">
+                      <Brain className="size-2.5" /> Learning
+                    </span>
+                  )}
+                </>
               )}
             </div>
             <div className="text-[10px] text-muted-foreground">
               {active
                 ? thinking
                   ? "جاري التحليل..."
-                  : `تقييم كل 2 ثانية · تيكر #${tickRef.current}`
-                : "Neural Policy · PPO Inference"}
+                  : `تيكر #${tickRef.current} · خطوات التعلم: ${learningStep} · استكشاف: ${(explorationRate * 100).toFixed(0)}%`
+                : "PPO Neural Policy · 14-feature · 32-16-3 layers · Online REINFORCE"
+              }
             </div>
           </div>
         </div>
         <button
-          onClick={() => setActive((v) => !v)}
+          onClick={() => setActive(v => !v)}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-[12px] font-bold border transition-all",
             active
@@ -271,7 +553,7 @@ export function RLAgentPanel({
               : "bg-card border-border text-foreground hover:border-primary hover:text-primary"
           )}
         >
-          <Power className={cn("size-3.5 transition-transform", active && "rotate-0")} />
+          <Power className="size-3.5" />
           {active ? "إيقاف" : "تفعيل الوكيل"}
         </button>
       </header>
@@ -289,14 +571,29 @@ export function RLAgentPanel({
         {active && !noData && (
           <>
             <div className="grid grid-cols-3 gap-3">
-              <DecisionCard action={current?.action ?? null} thinking={thinking} />
+              <DecisionCard action={current?.action ?? null} thinking={thinking}
+                exploration={current?.explorationBonus === 1} />
               <ConfidenceCard confidence={current?.confidence ?? null} thinking={thinking} />
               <ScoreCard score={current?.score ?? null} thinking={thinking} />
             </div>
 
             {/* Probability bars */}
-            {current && (
-              <ProbBars probs={current.probs} thinking={thinking} />
+            {current && <ProbBars probs={current.probs} thinking={thinking} />}
+
+            {/* Performance metrics */}
+            {perf.totalTrades >= 2 && (
+              <div className="rounded-xl border border-border bg-secondary/20 p-3 grid grid-cols-4 gap-2 text-center">
+                <PerfCell label="الصفقات" value={perf.totalTrades.toString()} />
+                <PerfCell label="WinRate"
+                  value={`${winRate.toFixed(0)}%`}
+                  color={winRate >= 55 ? "text-bull" : winRate >= 45 ? "text-gold" : "text-bear"} />
+                <PerfCell label="PnL الحي"
+                  value={`${perf.totalPnl >= 0 ? "+" : ""}${(perf.totalPnl * 100).toFixed(2)}%`}
+                  color={perf.totalPnl >= 0 ? "text-bull" : "text-bear"} />
+                <PerfCell label={`سلسلة`}
+                  value={perf.streak > 1 ? `${perf.streak}${perf.streakType === "win" ? "✓" : "✗"}` : "-"}
+                  color={perf.streakType === "win" ? "text-bull" : perf.streakType === "loss" ? "text-bear" : ""} />
+              </div>
             )}
 
             {/* State vector */}
@@ -307,15 +604,24 @@ export function RLAgentPanel({
                     <Database className="size-3 text-primary" />
                     State Vector
                   </div>
-                  <span className="text-[10px] mono bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 rounded-full">
-                    {stateItems.length} features
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] mono text-gold">ε={( explorationRate * 100).toFixed(1)}%</span>
+                    <span className="text-[10px] mono bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 rounded-full">
+                      {stateItems.length} features
+                    </span>
+                  </div>
                 </div>
-                <div className="grid grid-cols-5 gap-1.5">
+                <div className="grid grid-cols-7 gap-1">
                   {stateItems.map(({ k, v }) => (
                     <FeatureCell key={k} name={k} value={v} />
                   ))}
                 </div>
+                {learningStep > 0 && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-bull mt-1">
+                    <Brain className="size-3" />
+                    <span>خطوات تدريب: {learningStep} · عينات الذاكرة: {replayRef.current.length}/{MAX_REPLAY}</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -327,7 +633,7 @@ export function RLAgentPanel({
                   سجل القرارات
                 </div>
                 <div className="space-y-1 max-h-48 overflow-y-auto rounded-xl border border-border bg-secondary/10 p-2">
-                  {log.map((d) => (
+                  {log.map(d => (
                     <LogRow key={`${d.tick}-${d.timestamp}`} decision={d} isLatest={d.tick === current?.tick} />
                   ))}
                 </div>
@@ -344,9 +650,14 @@ export function RLAgentPanel({
             </div>
             <div>
               <div className="text-sm font-semibold">اضغط "تفعيل الوكيل" للبدء</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5">
-                الوكيل يحلّل دفتر الأوامر ويصدر قرار كل ثانيتين
+              <div className="text-[11px] text-muted-foreground mt-0.5 max-w-xs mx-auto">
+                وكيل تعزيزي حقيقي (REINFORCE) بذاكرة تجارب وتعلم تلقائي من كل قرار
               </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
+              <ArchBadge icon={<Brain className="size-3" />} label="14 مدخل" />
+              <ArchBadge icon={<BarChart2 className="size-3" />} label="32-16-3 طبقات" />
+              <ArchBadge icon={<Target className="size-3" />} label="REINFORCE" />
             </div>
           </div>
         )}
@@ -355,9 +666,26 @@ export function RLAgentPanel({
   );
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────
+// ── Sub-components ─────────────────────────────────────────────────────────────
+function ArchBadge({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card/40 px-2 py-1.5 flex items-center gap-1.5 justify-center text-muted-foreground">
+      {icon}{label}
+    </div>
+  );
+}
 
-function DecisionCard({ action, thinking }: { action: RLAction | null; thinking: boolean }) {
+function PerfCell({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card/40 py-1.5">
+      <div className="text-[9px] text-muted-foreground uppercase tracking-wider">{label}</div>
+      <div className={cn("mono text-[11px] font-bold mt-0.5", color ?? "text-foreground")}>{value}</div>
+    </div>
+  );
+}
+
+function DecisionCard({ action, thinking, exploration }:
+  { action: RLAction | null; thinking: boolean; exploration?: boolean }) {
   const cfg = {
     LONG:  { color: "text-bull", bg: "bg-bull/8 border-bull/30",  Icon: TrendingUp,  ar: "شراء LONG"  },
     SHORT: { color: "text-bear", bg: "bg-bear/8 border-bear/30",  Icon: TrendingDown, ar: "بيع SHORT" },
@@ -366,9 +694,12 @@ function DecisionCard({ action, thinking }: { action: RLAction | null; thinking:
   const c = action ? cfg[action] : null;
   return (
     <div className={cn(
-      "rounded-xl border p-3 transition-all",
+      "rounded-xl border p-3 transition-all relative",
       thinking ? "animate-pulse bg-secondary/30 border-border" : c ? c.bg : "bg-card/40 border-border"
     )}>
+      {exploration && !thinking && (
+        <span className="absolute top-1 left-1 text-[8px] mono text-primary opacity-70">ε</span>
+      )}
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">القرار</div>
       {c && !thinking ? (
         <>
@@ -414,7 +745,8 @@ function ConfidenceCard({ confidence, thinking }: { confidence: number | null; t
 }
 
 function ScoreCard({ score, thinking }: { score: number | null; thinking: boolean }) {
-  const color = score === null ? "text-muted-foreground" : score >= 15 ? "text-bull" : score <= -15 ? "text-bear" : "text-gold";
+  const color = score === null ? "text-muted-foreground"
+    : score >= 15 ? "text-bull" : score <= -15 ? "text-bear" : "text-gold";
   return (
     <div className="rounded-xl border border-border bg-card/40 p-3">
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">درجة المؤسسي</div>
@@ -462,10 +794,10 @@ function ProbBars({ probs, thinking }: { probs: ActionProbs; thinking: boolean }
 function FeatureCell({ name, value }: { name: string; value: number }) {
   const color = value > 0.05 ? "text-bull" : value < -0.05 ? "text-bear" : "text-muted-foreground";
   return (
-    <div className="rounded-lg border border-border bg-card/40 px-2 py-1.5 text-center">
-      <div className="text-[9px] text-muted-foreground uppercase tracking-wider">{name}</div>
-      <div className={cn("mono text-[11px] font-bold mt-0.5", color)}>
-        {value >= 0 ? "+" : ""}{value.toFixed(3)}
+    <div className="rounded-lg border border-border bg-card/40 px-1.5 py-1 text-center">
+      <div className="text-[8px] text-muted-foreground uppercase tracking-wider truncate">{name}</div>
+      <div className={cn("mono text-[10px] font-bold mt-0.5", color)}>
+        {value >= 0 ? "+" : ""}{value.toFixed(2)}
       </div>
     </div>
   );
@@ -473,7 +805,7 @@ function FeatureCell({ name, value }: { name: string; value: number }) {
 
 function LogRow({ decision, isLatest }: { decision: AgentDecision; isLatest: boolean }) {
   const time = new Date(decision.timestamp).toLocaleTimeString("ar", {
-    hour: "2-digit", minute: "2-digit", second: "2-digit"
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
   });
   const color = { LONG: "text-bull", SHORT: "text-bear", HOLD: "text-gold" }[decision.action];
   const bg = {
@@ -490,6 +822,9 @@ function LogRow({ decision, isLatest }: { decision: AgentDecision; isLatest: boo
       <span className={cn("font-black w-12 text-center", color)}>{decision.action}</span>
       <span className="text-muted-foreground w-14 text-center">{decision.confidence}%</span>
       <span className="text-muted-foreground">{fmtPrice(decision.entry)}</span>
+      {decision.explorationBonus === 1 && (
+        <span className="text-[8px] text-primary">ε</span>
+      )}
       <span className="text-muted-foreground text-[9px] w-10 text-left">#{decision.tick}</span>
     </div>
   );

@@ -6,7 +6,7 @@ export type RLResult = {
 };
 
 export async function callRL(stateVector: number[]): Promise<RLResult> {
-  const res = await fetch("http://localhost:3001/api/rl/action", {
+  const res = await fetch("/api/rl/action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ state: stateVector }),

@@ -1,5 +1,6 @@
 // Binance public market data — no API key needed.
-// REST: https://api.binance.com  WS: wss://stream.binance.com:9443
+// REST proxied via /binance-rest  →  https://api.binance.com
+// WS  proxied via /binance-ws    →  wss://stream.binance.com
 
 export const SYMBOLS = [
   "BTCUSDT",
@@ -32,20 +33,20 @@ export interface DepthLevel {
 }
 
 export interface OrderBook {
-  bids: DepthLevel[]; // sorted desc by price
-  asks: DepthLevel[]; // sorted asc by price
+  bids: DepthLevel[];
+  asks: DepthLevel[];
   lastUpdateId: number;
 }
 
 export interface Ticker {
   symbol: string;
   last: number;
-  change: number;       // 24h price change
-  changePct: number;    // 24h % change
+  change: number;
+  changePct: number;
   high: number;
   low: number;
-  volume: number;       // base asset
-  quoteVolume: number;  // quote asset (USDT)
+  volume: number;
+  quoteVolume: number;
 }
 
 export interface Kline {
@@ -58,29 +59,30 @@ export interface Kline {
   closeTime: number;
 }
 
+// ── REST helpers ───────────────────────────────────────────────────────────
+// Use local proxy path so the request stays same-origin (avoids CORS / WS blocks).
+function restUrl(path: string) {
+  return `/binance-rest${path}`;
+}
+
+export function wsUrl(stream: string) {
+  // Use relative proxy so WS goes through Vite → Binance
+  return `/binance-ws/ws/${stream}`;
+}
+
 export async function fetchDepth(symbol: string, limit = 500): Promise<OrderBook> {
-  const r = await fetch(
-    `https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=${limit}`
-  );
+  const r = await fetch(restUrl(`/api/v3/depth?symbol=${symbol}&limit=${limit}`));
   if (!r.ok) throw new Error(`depth ${r.status}`);
   const j = await r.json();
   return {
     lastUpdateId: j.lastUpdateId,
-    bids: (j.bids as [string, string][]).map(([p, q]) => ({
-      price: +p,
-      qty: +q,
-    })),
-    asks: (j.asks as [string, string][]).map(([p, q]) => ({
-      price: +p,
-      qty: +q,
-    })),
+    bids: (j.bids as [string, string][]).map(([p, q]) => ({ price: +p, qty: +q })),
+    asks: (j.asks as [string, string][]).map(([p, q]) => ({ price: +p, qty: +q })),
   };
 }
 
 export async function fetchTicker(symbol: string): Promise<Ticker> {
-  const r = await fetch(
-    `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
-  );
+  const r = await fetch(restUrl(`/api/v3/ticker/24hr?symbol=${symbol}`));
   if (!r.ok) throw new Error(`ticker ${r.status}`);
   const j = await r.json();
   return {
@@ -97,7 +99,7 @@ export async function fetchTicker(symbol: string): Promise<Ticker> {
 
 export async function fetchAllTickers(symbols: readonly string[]): Promise<Ticker[]> {
   const param = encodeURIComponent(JSON.stringify(symbols));
-  const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbols=${param}`);
+  const r = await fetch(restUrl(`/api/v3/ticker/24hr?symbols=${param}`));
   if (!r.ok) throw new Error(`tickers ${r.status}`);
   const arr = (await r.json()) as any[];
   return arr.map((j) => ({
@@ -118,7 +120,7 @@ export async function fetchKlines(
   limit = 200
 ): Promise<Kline[]> {
   const r = await fetch(
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`
+    restUrl(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`)
   );
   if (!r.ok) throw new Error(`klines ${r.status}`);
   const arr = (await r.json()) as any[][];
@@ -133,6 +135,7 @@ export async function fetchKlines(
   }));
 }
 
+// ── Formatters ─────────────────────────────────────────────────────────────
 export function fmtPrice(n: number, decimals?: number): string {
   if (!isFinite(n)) return "—";
   const d =

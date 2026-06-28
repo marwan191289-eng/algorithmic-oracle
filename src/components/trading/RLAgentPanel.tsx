@@ -97,22 +97,42 @@ function forwardPass(state: number[]): ActionProbs {
 }
 
 // ── State vector ───────────────────────────────────────────────────────────
-function buildStateArray(v: InstitutionalVerdictV2, m: BookMetrics): number[] {
+// Build state from verdict + metrics (full) or metrics only (partial, while klines load)
+function buildStateArray(v: InstitutionalVerdictV2 | null, m: BookMetrics): number[] {
+  if (v) {
+    return [
+      v.score / 100,
+      v.confidence / 100,
+      v.components.bookImbalance,
+      v.components.proximityPressure,
+      v.components.microDrift,
+      v.components.momentum,
+      v.components.volumeTrend,
+      v.components.rsiPenalty,
+      Math.min(m.spreadPct / 0.1, 1),
+      v.components.wallPressure,
+    ];
+  }
+  // Partial state from book metrics alone (score/conf/mom/rsi/wallPressure unknown → 0)
+  const imbal = m.imbalance;         // [-1, +1]
+  const spread = Math.min(m.spreadPct / 0.1, 1);
+  const micro = (m.microPrice - m.mid) / (m.mid || 1) * 100; // micro drift %
+  const vwapDrift = (m.vwapBid - m.vwapAsk) / (m.mid || 1);  // proxy for pressure
   return [
-    v.score / 100,
-    v.confidence / 100,
-    v.components.bookImbalance,
-    v.components.proximityPressure,
-    v.components.microDrift,
-    v.components.momentum,
-    v.components.volumeTrend,
-    v.components.rsiPenalty,
-    Math.min(m.spreadPct / 0.1, 1),      // normalize spread
-    v.components.wallPressure,
+    0,          // score unknown
+    0,          // confidence unknown
+    imbal,      // bookImbalance
+    vwapDrift,  // proximityPressure proxy
+    micro,      // microDrift
+    0,          // momentum unknown (needs klines)
+    0,          // volumeTrend unknown
+    0,          // rsiPenalty unknown
+    spread,
+    imbal * 0.5, // wallImbalance proxy
   ];
 }
 
-function buildStateMap(v: InstitutionalVerdictV2, m: BookMetrics) {
+function buildStateMap(v: InstitutionalVerdictV2 | null, m: BookMetrics) {
   const arr = buildStateArray(v, m);
   const keys = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb"];
   return keys.map((k, i) => ({ k, v: arr[i] }));
@@ -152,9 +172,9 @@ export function RLAgentPanel({
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const evaluate = useCallback(() => {
-    if (!verdict || !metrics) return;
+    // Works with metrics alone (partial), or metrics+verdict (full)
+    if (!metrics) return;
     setThinking(true);
-    // tiny delay for visual "thinking" effect (50ms)
     setTimeout(() => {
       const state = buildStateArray(verdict, metrics);
       const probs = forwardPass(state);
@@ -164,7 +184,7 @@ export function RLAgentPanel({
         action,
         probs,
         confidence,
-        score: verdict.score,
+        score: verdict?.score ?? 0,
         timestamp: Date.now(),
         entry: metrics.mid,
         tick: tickRef.current,
@@ -201,9 +221,9 @@ export function RLAgentPanel({
   }, [active]);
 
   const stateItems =
-    active && verdict && metrics ? buildStateMap(verdict, metrics) : null;
+    active && metrics ? buildStateMap(verdict, metrics) : null;
 
-  const noData = active && (!verdict || !metrics);
+  const noData = active && !metrics;
 
   return (
     <div className={cn(

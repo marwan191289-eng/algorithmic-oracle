@@ -1,240 +1,167 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   fetchDepth,
+  fetchTicker,
+  fetchAllTickers,
   type OrderBook,
   type Ticker,
 } from "@/lib/binance";
 import { useSession } from "@/lib/session-store";
 
-// ─── live depth via @depth20@100ms (full snapshot, simpler & reliable) ───
+// ─── live depth via REST polling (1s) ────────────────────────────────────
+// WebSocket to stream.binance.com is blocked in the Replit sandbox proxy
+// environment. REST polling via the local /binance-rest proxy works reliably.
 export function useLiveDepth(symbol: string) {
   const [book, setBook] = useState<OrderBook | null>(null);
   const [connected, setConnected] = useState(false);
   const updateQualityRef = useRef(useSession.getState().updateQuality);
   const pushQualitySampleRef = useRef(useSession.getState().pushQualitySample);
+  const aliveRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const msgTimestampsRef = useRef<number[]>([]);
+  const disconnectsRef = useRef(0);
+  const totalMsgsRef = useRef(0);
 
   useEffect(() => {
     updateQualityRef.current = useSession.getState().updateQuality;
     pushQualitySampleRef.current = useSession.getState().pushQualitySample;
   });
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    let alive = true;
-    let ws: WebSocket | null = null;
-    let retryTimer: number | null = null;
-    let msgTimestamps: number[] = [];
-    let latSum = 0;
-    let latCount = 0;
-    let disconnects = 0;
-    let totalMessages = 0;
-
-    // periodic recompute (also catches "no messages = degraded")
-    const tickTimer = window.setInterval(() => {
+  const poll = useCallback(async () => {
+    if (!aliveRef.current) return;
+    try {
+      const data = await fetchDepth(symbol, 100);
+      if (!aliveRef.current) return;
+      setBook(data);
+      setConnected(true);
       const now = Date.now();
-      msgTimestamps = msgTimestamps.filter((t) => now - t < 5000);
-      const rate = msgTimestamps.length / 5;
-      const avgLat = latCount ? latSum / latCount : 0;
+      msgTimestampsRef.current.push(now);
+      totalMsgsRef.current += 1;
+      // keep only last 5s
+      msgTimestampsRef.current = msgTimestampsRef.current.filter(
+        (t) => now - t < 5000
+      );
+      const rate = msgTimestampsRef.current.length / 5;
       updateQualityRef.current(symbol, {
         symbol,
+        connected: true,
         updateRateHz: rate,
-        latencyMs: avgLat,
-        lastMsgAt: msgTimestamps[msgTimestamps.length - 1] ?? 0,
-        totalMessages,
-        disconnects,
+        latencyMs: 0,
+        lastMsgAt: now,
+        totalMessages: totalMsgsRef.current,
+        disconnects: disconnectsRef.current,
       });
       pushQualitySampleRef.current(symbol);
-    }, 1000);
-
-    fetchDepth(symbol, 500).then((b) => alive && setBook(b)).catch(() => {});
-
-    const connect = () => {
-      ws = new WebSocket(
-        `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@depth20@100ms`
-      );
-      ws.onopen = () => {
-        if (!alive) return;
-        setConnected(true);
-        updateQualityRef.current(symbol, { symbol, connected: true });
-      };
-      ws.onclose = () => {
-        if (!alive) return;
-        setConnected(false);
-        disconnects += 1;
-        updateQualityRef.current(symbol, { symbol, connected: false, disconnects });
-        retryTimer = window.setTimeout(connect, 2000);
-      };
-      ws.onerror = () => ws?.close();
-      ws.onmessage = (e) => {
-        if (!alive) return;
-        try {
-          const m = JSON.parse(e.data);
-          const now = Date.now();
-          msgTimestamps.push(now);
-          totalMessages += 1;
-          if (typeof m.E === "number") {
-            const lat = Math.max(0, now - m.E);
-            latSum += lat;
-            latCount += 1;
-            if (latCount > 50) {
-              latSum *= 0.5;
-              latCount = Math.floor(latCount * 0.5);
-            }
-          }
-          const bids = (m.bids as [string, string][]).map(([p, q]) => ({
-            price: +p,
-            qty: +q,
-          }));
-          const asks = (m.asks as [string, string][]).map(([p, q]) => ({
-            price: +p,
-            qty: +q,
-          }));
-          setBook((prev) => {
-            if (!prev) return { bids, asks, lastUpdateId: m.lastUpdateId };
-            const mergedBids = mergeLevels(prev.bids, bids, "desc");
-            const mergedAsks = mergeLevels(prev.asks, asks, "asc");
-            return {
-              bids: mergedBids,
-              asks: mergedAsks,
-              lastUpdateId: m.lastUpdateId,
-            };
-          });
-        } catch {}
-      };
-    };
-
-    connect();
-    return () => {
-      alive = false;
-      window.clearInterval(tickTimer);
-      if (retryTimer) window.clearTimeout(retryTimer);
-      ws?.close();
-    };
+    } catch {
+      if (!aliveRef.current) return;
+      setConnected(false);
+      disconnectsRef.current += 1;
+      updateQualityRef.current(symbol, {
+        symbol,
+        connected: false,
+        disconnects: disconnectsRef.current,
+      });
+    }
+    if (aliveRef.current) {
+      timerRef.current = setTimeout(poll, 1000);
+    }
   }, [symbol]);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    msgTimestampsRef.current = [];
+    totalMsgsRef.current = 0;
+    disconnectsRef.current = 0;
+    setBook(null);
+    setConnected(false);
+    poll();
+    return () => {
+      aliveRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [symbol, poll]);
 
   return { book, connected };
 }
 
-
-function mergeLevels(
-  base: { price: number; qty: number }[],
-  live: { price: number; qty: number }[],
-  order: "asc" | "desc"
-) {
-  const map = new Map<number, number>();
-  for (const l of base) map.set(l.price, l.qty);
-  for (const l of live) map.set(l.price, l.qty); // live overrides top
-  const arr = Array.from(map, ([price, qty]) => ({ price, qty })).filter(
-    (l) => l.qty > 0
-  );
-  arr.sort((a, b) => (order === "asc" ? a.price - b.price : b.price - a.price));
-  return arr.slice(0, 500);
-}
-
-// ─── live ticker for a symbol via @ticker stream ───
+// ─── live ticker via REST polling (2s) ────────────────────────────────────
 export function useLiveTicker(symbol: string) {
   const [ticker, setTicker] = useState<Ticker | null>(null);
   const lastPrice = useRef<number | null>(null);
   const [flash, setFlash] = useState<"up" | "down" | null>(null);
+  const aliveRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const poll = useCallback(async () => {
+    if (!aliveRef.current) return;
+    try {
+      const t = await fetchTicker(symbol);
+      if (!aliveRef.current) return;
+      if (lastPrice.current != null) {
+        if (t.last > lastPrice.current) {
+          setFlash("up");
+          setTimeout(() => setFlash(null), 600);
+        } else if (t.last < lastPrice.current) {
+          setFlash("down");
+          setTimeout(() => setFlash(null), 600);
+        }
+      }
+      lastPrice.current = t.last;
+      setTicker(t);
+    } catch {
+      // silent — keep last known ticker
+    }
+    if (aliveRef.current) {
+      timerRef.current = setTimeout(poll, 2000);
+    }
+  }, [symbol]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    let alive = true;
-    let ws: WebSocket | null = null;
-    let retryTimer: number | null = null;
-
-    const connect = () => {
-      ws = new WebSocket(
-        `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@ticker`
-      );
-      ws.onclose = () => {
-        if (!alive) return;
-        retryTimer = window.setTimeout(connect, 2000);
-      };
-      ws.onerror = () => ws?.close();
-      ws.onmessage = (e) => {
-        if (!alive) return;
-        try {
-          const m = JSON.parse(e.data);
-          const t: Ticker = {
-            symbol: m.s,
-            last: +m.c,
-            change: +m.p,
-            changePct: +m.P,
-            high: +m.h,
-            low: +m.l,
-            volume: +m.v,
-            quoteVolume: +m.q,
-          };
-          if (lastPrice.current != null) {
-            if (t.last > lastPrice.current) setFlash("up");
-            else if (t.last < lastPrice.current) setFlash("down");
-            window.setTimeout(() => setFlash(null), 600);
-          }
-          lastPrice.current = t.last;
-          setTicker(t);
-        } catch {}
-      };
-    };
-
-    connect();
+    aliveRef.current = true;
+    lastPrice.current = null;
+    setTicker(null);
+    poll();
     return () => {
-      alive = false;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      ws?.close();
+      aliveRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [symbol]);
+  }, [symbol, poll]);
 
   return { ticker, flash };
 }
 
-// ─── multi-symbol tickers via combined mini-ticker stream ───
+// ─── multi-symbol tickers via REST polling (5s) ───────────────────────────
 export function useLiveTickers(symbols: readonly string[]) {
   const [map, setMap] = useState<Record<string, Ticker>>({});
+  const aliveRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const symbolsKey = symbols.join(",");
+
+  const poll = useCallback(async () => {
+    if (!aliveRef.current) return;
+    try {
+      const tickers = await fetchAllTickers(symbols);
+      if (!aliveRef.current) return;
+      const next: Record<string, Ticker> = {};
+      for (const t of tickers) next[t.symbol] = t;
+      setMap(next);
+    } catch {
+      // keep last known
+    }
+    if (aliveRef.current) {
+      timerRef.current = setTimeout(poll, 5000);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolsKey]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    let alive = true;
-    let ws: WebSocket | null = null;
-    let retryTimer: number | null = null;
-
-    const streams = symbols.map((s) => `${s.toLowerCase()}@ticker`).join("/");
-
-    const connect = () => {
-      ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
-      ws.onclose = () => {
-        if (!alive) return;
-        retryTimer = window.setTimeout(connect, 2000);
-      };
-      ws.onerror = () => ws?.close();
-      ws.onmessage = (e) => {
-        if (!alive) return;
-        try {
-          const env = JSON.parse(e.data);
-          const m = env.data ?? env;
-          if (!m.s) return;
-          const t: Ticker = {
-            symbol: m.s,
-            last: +m.c,
-            change: +m.p,
-            changePct: +m.P,
-            high: +m.h,
-            low: +m.l,
-            volume: +m.v,
-            quoteVolume: +m.q,
-          };
-          setMap((prev) => ({ ...prev, [t.symbol]: t }));
-        } catch {}
-      };
-    };
-
-    connect();
+    aliveRef.current = true;
+    poll();
     return () => {
-      alive = false;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      ws?.close();
+      aliveRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [symbols.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [poll]);
 
   return map;
 }

@@ -320,7 +320,15 @@ function SymbolView({
     });
   }, [verdict, metrics, symbol, interval]);
 
-  if (!book || !metrics) return <LoadingSkeleton symbol={symbol} />;
+  if (!book || !metrics) {
+    return (
+      <div className="space-y-5">
+        <RLAgentPanel verdict={verdict as any} metrics={metrics} />
+        <LoadingSkeleton symbol={symbol} />
+      </div>
+    );
+  }
+
   const qScore = quality?.score ?? 100;
   const blocked = blockDecision.blocked;
 
@@ -328,6 +336,9 @@ function SymbolView({
 
   return (
     <div className="space-y-5">
+      {/* RL Agent — always visible at top */}
+      <RLAgentPanel verdict={verdict as any} metrics={metrics} />
+
       {/* Symbol header card */}
       <div className="rounded-2xl border border-border glass p-5">
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -472,8 +483,6 @@ function SymbolView({
             </div>
           </div>
 
-          {/* RL Agent */}
-          <RLAgentPanel verdict={verdict as any} metrics={metrics} />
         </>
       )}
     </div>

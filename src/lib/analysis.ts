@@ -251,16 +251,23 @@ export function detectWalls(
 
 // ──────────────────────────────────────────────────────────────
 //  3.  STOP-HUNT ZONES  (مناطق صيد الأستوبات / السيولة)
-//  Swing high/low clustering -> equal-highs / equal-lows.
+//  Improved v2: swing clustering + equal-highs/lows detection
+//  + volume-weighted scoring + inducement detection.
 // ──────────────────────────────────────────────────────────────
 
 export interface LiquidityZone {
-  side: "above" | "below";  // above mid = sell-side liquidity (shorts' stops)
-  price: number;            // cluster mean price
-  touches: number;          // number of swings in cluster
-  distancePct: number;      // signed: + above, − below
-  strength: number;         // touches * recency
-  probability: number;      // 0..100 heuristic of being hunted
+  side: "above" | "below";    // above mid = sell-side liquidity (shorts' stops)
+  price: number;              // cluster mean price
+  touches: number;            // number of swings in cluster
+  distancePct: number;        // signed: + above, − below
+  strength: number;           // composite score
+  probability: number;        // 0..100 — calibrated hunt probability
+  // v2 additions (always present)
+  volumeScore: number;        // 0..1 — avg normalised volume at pivot candles
+  equalLevel: boolean;        // true = tight equal-highs / equal-lows cluster
+  induced: boolean;           // true = level was swept and reversed (inducement)
+  zoneHigh: number;           // cluster price range top
+  zoneLow: number;            // cluster price range bottom
 }
 
 export function detectLiquidityZones(
@@ -268,37 +275,71 @@ export function detectLiquidityZones(
   mid: number,
   opts: { lookback?: number; pivotWindow?: number; clusterPct?: number } = {}
 ): LiquidityZone[] {
-  const lookback = opts.lookback ?? Math.min(klines.length, 120);
-  const w = opts.pivotWindow ?? 3;
-  const clusterPct = opts.clusterPct ?? 0.25; // 0.25%
+  if (!mid || klines.length < 10) return [];
 
-  const series = klines.slice(-lookback);
-  const highs: { price: number; idx: number }[] = [];
-  const lows: { price: number; idx: number }[] = [];
+  const lookback   = opts.lookback    ?? Math.min(klines.length, 150);
+  const w          = opts.pivotWindow ?? 3;
+  // Two cluster thresholds: tight (equal highs/lows) and normal (swing clusters)
+  const tightPct   = 0.12;   // < 0.12% = "equal" highs/lows
+  const normalPct  = opts.clusterPct ?? 0.22;
 
-  for (let i = w; i < series.length - w; i++) {
+  const series     = klines.slice(-lookback);
+  const n          = series.length;
+
+  // Compute volume z-scores for the series (needed for volume weighting)
+  const vols       = series.map(k => k.volume);
+  const vMean      = vols.reduce((a, b) => a + b, 0) / vols.length || 1;
+  const vSd        = Math.sqrt(vols.reduce((a, b) => a + (b - vMean) ** 2, 0) / vols.length) || 1;
+  const vNorm      = (i: number) => Math.max(0, Math.min(1, (series[i].volume - vMean) / vSd * 0.25 + 0.5));
+
+  // Pivot detection: strict on left side, relax slightly on right (not yet confirmed)
+  interface Pivot { price: number; idx: number; vol: number }
+  const highs: Pivot[] = [];
+  const lows:  Pivot[] = [];
+
+  for (let i = w; i < n - w; i++) {
     const c = series[i];
     let isHigh = true, isLow = true;
     for (let k = 1; k <= w; k++) {
       if (series[i - k].high >= c.high || series[i + k].high >= c.high) isHigh = false;
-      if (series[i - k].low <= c.low || series[i + k].low <= c.low) isLow = false;
+      if (series[i - k].low  <= c.low  || series[i + k].low  <= c.low)  isLow  = false;
       if (!isHigh && !isLow) break;
     }
-    if (isHigh) highs.push({ price: c.high, idx: i });
-    if (isLow) lows.push({ price: c.low, idx: i });
+    if (isHigh) highs.push({ price: c.high, idx: i, vol: vNorm(i) });
+    if (isLow)  lows.push ({ price: c.low,  idx: i, vol: vNorm(i) });
   }
 
-  const cluster = (
-    pts: { price: number; idx: number }[],
-    side: "above" | "below"
+  // ── Inducement detection ───────────────────────────────────────────────
+  // A level is "induced" if price briefly broke past it but then reversed.
+  // Look for: swing high at level X, then a candle went above X but closed below X.
+  const isInduced = (pivotPrice: number, pivotIdx: number, side: "above" | "below"): boolean => {
+    for (let i = pivotIdx + 1; i < Math.min(n, pivotIdx + 20); i++) {
+      const k = series[i];
+      if (side === "above") {
+        // Wick above pivot high but close below it → inducement
+        if (k.high > pivotPrice * 1.0002 && k.close < pivotPrice) return true;
+      } else {
+        // Wick below pivot low but close above it → inducement
+        if (k.low < pivotPrice * 0.9998 && k.close > pivotPrice) return true;
+      }
+    }
+    return false;
+  };
+
+  // ── Clustering ─────────────────────────────────────────────────────────
+  const buildClusters = (
+    pts: Pivot[],
+    side: "above" | "below",
+    clusterThreshold: number
   ): LiquidityZone[] => {
     if (!pts.length) return [];
     const sorted = [...pts].sort((a, b) => a.price - b.price);
-    const groups: { price: number; idx: number }[][] = [];
-    let cur: { price: number; idx: number }[] = [sorted[0]];
+    const groups: Pivot[][] = [];
+    let cur: Pivot[] = [sorted[0]];
+
     for (let i = 1; i < sorted.length; i++) {
-      const prev = cur[cur.length - 1].price;
-      if ((Math.abs(sorted[i].price - prev) / prev) * 100 <= clusterPct) {
+      const ref = cur[cur.length - 1].price;
+      if ((Math.abs(sorted[i].price - ref) / ref) * 100 <= clusterThreshold) {
         cur.push(sorted[i]);
       } else {
         groups.push(cur);
@@ -308,36 +349,95 @@ export function detectLiquidityZones(
     groups.push(cur);
 
     return groups
-      .map((g) => {
-        const meanPrice = g.reduce((s, p) => s + p.price, 0) / g.length;
-        const recency =
-          g.reduce((s, p) => s + p.idx, 0) / g.length / lookback;
+      .map((g): LiquidityZone | null => {
+        const prices     = g.map(p => p.price);
+        const meanPrice  = prices.reduce((a, b) => a + b, 0) / g.length;
+        const minPrice   = Math.min(...prices);
+        const maxPrice   = Math.max(...prices);
         const distancePct = ((meanPrice - mid) / mid) * 100;
-        if (side === "above" && distancePct < 0) return null;
-        if (side === "below" && distancePct > 0) return null;
-        const absDist = Math.abs(distancePct);
-        // Probability: more touches, closer to price, more recent → higher.
-        const probability = Math.min(
-          100,
-          g.length * 18 +
-            Math.max(0, 25 - absDist * 8) +
-            recency * 25
-        );
+
+        if (side === "above" && distancePct <= 0) return null;
+        if (side === "below" && distancePct >= 0) return null;
+
+        const absDist    = Math.abs(distancePct);
+        // Skip zones more than 8% away — too far to be actionable
+        if (absDist > 8) return null;
+
+        const recency    = g.reduce((s, p) => s + p.idx, 0) / g.length / n;   // 0..1
+        const volScore   = g.reduce((s, p) => s + p.vol, 0) / g.length;        // 0..1
+        const equalLevel = clusterThreshold === tightPct;
+        const induced    = g.some(p => isInduced(p.price, p.idx, side));
+
+        // ── Probability formula (calibrated) ──
+        // Base: touches (each swing = 20% base, diminishing)
+        const touchBase  = Math.min(50, g.length * 20 - (g.length > 2 ? 5 : 0));
+        // Proximity bonus: closer = more likely to be hit (max 20%)
+        const proxBonus  = Math.max(0, 20 - absDist * 4);
+        // Recency bonus: more recent = stops are fresher (max 15%)
+        const recBonus   = recency * 15;
+        // Volume bonus: high-vol candles = more significant level (max 10%)
+        const volBonus   = volScore * 10;
+        // Equal-level bonus: multiple near-identical tops/bottoms (max 15%)
+        const eqBonus    = equalLevel ? 15 : 0;
+        // Inducement bonus: level was already tapped = higher re-test probability (max 12%)
+        const indBonus   = induced ? 12 : 0;
+        // Distance penalty: levels > 3% away discounted
+        const distPenalty = Math.max(0, (absDist - 3) * 3);
+
+        const probability = Math.min(98, Math.max(5,
+          touchBase + proxBonus + recBonus + volBonus + eqBonus + indBonus - distPenalty
+        ));
+
+        const strength = g.length * (1 + volScore) * (1 + recency * 0.5) * (induced ? 1.3 : 1);
+
         return {
           side,
           price: meanPrice,
           touches: g.length,
           distancePct,
-          strength: g.length + recency * 2,
+          strength,
           probability,
-        } as LiquidityZone;
+          volumeScore: volScore,
+          equalLevel,
+          induced,
+          zoneHigh: maxPrice,
+          zoneLow:  minPrice,
+        };
       })
       .filter(Boolean) as LiquidityZone[];
   };
 
-  const above = cluster(highs, "above");
-  const below = cluster(lows, "below");
-  return [...above, ...below].sort((a, b) => b.probability - a.probability);
+  // Run with both tight (equal highs/lows) and normal thresholds,
+  // then merge duplicates (take highest probability for overlapping zones).
+  const allZones: LiquidityZone[] = [
+    ...buildClusters(highs, "above", tightPct),
+    ...buildClusters(highs, "above", normalPct),
+    ...buildClusters(lows,  "below", tightPct),
+    ...buildClusters(lows,  "below", normalPct),
+  ];
+
+  // Deduplicate: merge zones whose prices are within 0.3% of each other
+  const merged: LiquidityZone[] = [];
+  for (const z of allZones) {
+    const dup = merged.find(
+      m => m.side === z.side && Math.abs(m.price - z.price) / z.price * 100 < 0.3
+    );
+    if (dup) {
+      // Keep whichever has higher probability; absorb equal/induced flags
+      if (z.probability > dup.probability) {
+        Object.assign(dup, z);
+      } else {
+        dup.equalLevel = dup.equalLevel || z.equalLevel;
+        dup.induced    = dup.induced    || z.induced;
+      }
+    } else {
+      merged.push({ ...z });
+    }
+  }
+
+  return merged
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, 12); // cap at 12 zones
 }
 
 // ──────────────────────────────────────────────────────────────

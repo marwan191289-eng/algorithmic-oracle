@@ -4,13 +4,14 @@ import { cn } from "@/lib/utils";
 import {
   Bot, Power, TrendingUp, TrendingDown, Minus,
   Activity, Database, Zap, RefreshCw, Brain, Target,
-  BarChart2, Award, AlertCircle,
+  BarChart2,
 } from "lucide-react";
 import { fmtPrice } from "@/lib/binance";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 type RLAction = "LONG" | "SHORT" | "HOLD";
 interface ActionProbs { long: number; short: number; hold: number }
+
 interface AgentDecision {
   action: RLAction;
   probs: ActionProbs;
@@ -19,8 +20,7 @@ interface AgentDecision {
   timestamp: number;
   entry: number;
   tick: number;
-  stateArr: number[];
-  explorationBonus: number;
+  explorationBonus: boolean;
 }
 
 interface Experience {
@@ -28,147 +28,121 @@ interface Experience {
   action: number; // 0=LONG, 1=SHORT, 2=HOLD
   reward: number;
   nextState: number[];
-  done: boolean;
 }
 
-// ── Neural network architecture ─────────────────────────────────────────────
-// 14 inputs → 32 hidden (ReLU) → 16 hidden (ReLU) → 3 outputs (Softmax)
-// Weights initialized analytically and then updated via online learning
+// ── Constants ──────────────────────────────────────────────────────────────
+const INPUT_DIM   = 14;
+const H1_DIM      = 32;
+const H2_DIM      = 16;
+const OUTPUT_DIM  = 3;
+const LR          = 0.004;
+const GAMMA       = 0.92;
+const ENTROPY_C   = 0.08;
+const BATCH_SIZE  = 24;
+const MAX_REPLAY  = 500;
+const INIT_EXPL   = 0.15;
+const MIN_EXPL    = 0.02;
+const EXPL_DECAY  = 0.998;
 
-const INPUT_DIM = 14;
-const H1_DIM = 32;
-const H2_DIM = 16;
-const OUTPUT_DIM = 3;
-const LR = 0.004;         // learning rate
-const GAMMA = 0.92;        // discount factor
-const ENTROPY_COEFF = 0.08; // entropy bonus to prevent premature convergence
-const REPLAY_BATCH = 24;   // mini-batch size for gradient updates
-const MAX_REPLAY = 500;    // experience replay buffer size
-
+// ── Math helpers ───────────────────────────────────────────────────────────
 function relu(x: number) { return x > 0 ? x : 0; }
 function reluGrad(x: number) { return x > 0 ? 1 : 0; }
+function clamp01(x: number) { return Math.max(0, Math.min(1, x)); }
+function clampN1(x: number) { return Math.max(-1, Math.min(1, x)); }
 
 function softmax(arr: number[]): number[] {
   const max = Math.max(...arr);
   const exps = arr.map(x => Math.exp(x - max));
-  const sum = exps.reduce((a, b) => a + b, 0);
+  const sum  = exps.reduce((a, b) => a + b, 0) || 1;
   return exps.map(e => e / sum);
 }
 
-// He initialization for ReLU networks
-function heInit(fanIn: number, fanOut: number): number[][] {
-  const std = Math.sqrt(2 / fanIn);
-  return Array.from({ length: fanOut }, () =>
-    Array.from({ length: fanIn }, () => (Math.random() * 2 - 1) * std)
-  );
-}
-
-// ── Initial weights derived from institutional knowledge ─────────────────────
-function buildInitialWeights() {
-  // Seed with fixed value so weights are deterministic on first load
-  // Inputs: [score, conf, imbal, proxPx, micro, mom, volDir, rsi,
-  //          sprd, wallImb, atr, entropy, recentWinRate, sessionVolatility]
-  //          [0]   [1]   [2]    [3]    [4]    [5]  [6]   [7]
-  //          [8]   [9]   [10]   [11]   [12]   [13]
-
-  // Layer 1 W1 [H1_DIM × INPUT_DIM]
-  const W1: number[][] = [];
-  const b1: number[] = [];
-
-  // Units 0-9: bullish detectors
-  const bull = [3.2, 1.6, 2.8, 2.2, 1.9, 2.4, 1.6, -1.1, -0.5, 1.9, 0.3, 0.2, 1.2, 0.4];
-  for (let i = 0; i < 10; i++) {
-    W1.push(bull.map((w, j) => w * (0.80 + 0.35 * ((i * 7 + j * 3) % 10) / 10)));
-    b1.push(-0.4 - i * 0.04);
-  }
-  // Units 10-19: bearish detectors
-  const bear = [-3.2, 1.6, -2.8, -2.2, -1.9, -2.4, -1.6, 1.1, -0.5, -1.9, 0.3, 0.2, -1.2, 0.4];
-  for (let i = 0; i < 10; i++) {
-    W1.push(bear.map((w, j) => w * (0.80 + 0.35 * ((i * 11 + j * 5) % 10) / 10)));
-    b1.push(-0.4 - i * 0.04);
-  }
-  // Units 20-27: HOLD / uncertainty detectors
-  const hold = [0.5, -0.5, 0.3, 0.3, 0.2, 0.2, 0.1, 1.3, 0.9, 0.3, -0.2, 0.8, -0.3, 0.5];
-  for (let i = 0; i < 8; i++) {
-    W1.push(hold.map((w, j) => w * (0.9 + 0.2 * (i % 5) / 5)));
-    b1.push(0.2);
-  }
-  // Units 28-31: volatility / risk detectors
-  const vol = [0.2, 0.8, 0.1, 0.1, 0.5, 0.4, 0.6, 0.2, 1.2, 0.1, -1.8, -0.5, 0.4, 0.3];
-  for (let i = 0; i < 4; i++) {
-    W1.push(vol.map(w => w * (0.85 + 0.15 * i / 4)));
-    b1.push(0.0);
-  }
-
-  // Layer 2 W2 [H2_DIM × H1_DIM]
-  const W2: number[][] = [];
-  const b2: number[] = [];
-  for (let i = 0; i < H2_DIM; i++) {
-    const row: number[] = [];
-    for (let j = 0; j < H1_DIM; j++) {
-      // First 8 units of H1 are bull, next 10 are bear, rest are hold/vol
-      if (i < 6) row.push(j < 10 ? 1.2 : j < 20 ? -1.0 : 0.0); // bullish aggregators
-      else if (i < 12) row.push(j < 10 ? -1.0 : j < 20 ? 1.2 : 0.0); // bearish aggregators
-      else row.push(j < 20 ? -0.4 : 1.0); // hold aggregators
-    }
-    W2.push(row.map(w => w * (0.3 + Math.random() * 0.1)));
-    b2.push(i < 6 ? 0.0 : i < 12 ? 0.0 : 0.2);
-  }
-
-  // Output layer W3 [OUTPUT_DIM × H2_DIM]
-  const W3: number[][] = [
-    [...Array(6).fill(2.0), ...Array(6).fill(-1.8), ...Array(4).fill(-0.4)], // LONG
-    [...Array(6).fill(-1.8), ...Array(6).fill(2.0), ...Array(4).fill(-0.4)], // SHORT
-    [...Array(6).fill(-0.5), ...Array(6).fill(-0.5), ...Array(4).fill(1.6)], // HOLD
-  ];
-  const b3 = [0.0, 0.0, 0.4]; // slight HOLD bias
-
-  return { W1, b1, W2, b2, W3, b3 };
-}
-
-// ── Neural network forward pass ───────────────────────────────────────────────
+// ── Weights type ───────────────────────────────────────────────────────────
 interface Weights {
   W1: number[][]; b1: number[];
   W2: number[][]; b2: number[];
   W3: number[][]; b3: number[];
 }
 
-interface ForwardResult {
-  h1: number[];   // pre-activation
-  h1r: number[];  // post-relu
-  h2: number[];
-  h2r: number[];
-  logits: number[];
-  probs: number[];
+// ── Analytically-initialised weights ──────────────────────────────────────
+// Inputs: [score, conf, imbal, proxPx, micro, mom, volDir, rsi,
+//          sprd,  wallImb, atrNorm, entropy, recentWR, momStr]
+//          [0]    [1]    [2]    [3]    [4]    [5]    [6]    [7]
+//          [8]    [9]    [10]   [11]   [12]   [13]
+function buildInitialWeights(): Weights {
+  const bull  = [ 3.2, 1.6, 2.8, 2.2, 1.9, 2.4, 1.6,-1.1,-0.5, 1.9, 0.3, 0.2, 1.2, 0.4];
+  const bear  = [-3.2, 1.6,-2.8,-2.2,-1.9,-2.4,-1.6, 1.1,-0.5,-1.9, 0.3, 0.2,-1.2, 0.4];
+  const hold  = [ 0.5,-0.5, 0.3, 0.3, 0.2, 0.2, 0.1, 1.3, 0.9, 0.3,-0.2, 0.8,-0.3, 0.5];
+  const vol   = [ 0.2, 0.8, 0.1, 0.1, 0.5, 0.4, 0.6, 0.2, 1.2, 0.1,-1.8,-0.5, 0.4, 0.3];
+
+  const W1: number[][] = [];
+  const b1: number[]   = [];
+  for (let i = 0; i < 10; i++) {
+    W1.push(bull.map((w, j) => w * (0.80 + 0.35 * ((i * 7 + j * 3) % 10) / 10)));
+    b1.push(-0.4 - i * 0.04);
+  }
+  for (let i = 0; i < 10; i++) {
+    W1.push(bear.map((w, j) => w * (0.80 + 0.35 * ((i * 11 + j * 5) % 10) / 10)));
+    b1.push(-0.4 - i * 0.04);
+  }
+  for (let i = 0; i < 8; i++) {
+    W1.push(hold.map(w => w * (0.9 + 0.2 * (i % 5) / 5)));
+    b1.push(0.2);
+  }
+  for (let i = 0; i < 4; i++) {
+    W1.push(vol.map(w => w * (0.85 + 0.15 * i / 4)));
+    b1.push(0.0);
+  }
+
+  const W2: number[][] = [];
+  const b2: number[]   = [];
+  for (let i = 0; i < H2_DIM; i++) {
+    const row: number[] = [];
+    for (let j = 0; j < H1_DIM; j++) {
+      if (i < 6)       row.push(j < 10 ? 1.2 : j < 20 ? -1.0 : 0.0);
+      else if (i < 12) row.push(j < 10 ? -1.0 : j < 20 ? 1.2 : 0.0);
+      else             row.push(j < 20 ? -0.4 : 1.0);
+    }
+    W2.push(row.map(w => w * (0.3 + (i % 3) * 0.05)));
+    b2.push(i < 6 ? 0.0 : i < 12 ? 0.0 : 0.2);
+  }
+
+  const W3: number[][] = [
+    [...Array(6).fill(2.0), ...Array(6).fill(-1.8), ...Array(4).fill(-0.4)],
+    [...Array(6).fill(-1.8),...Array(6).fill(2.0),  ...Array(4).fill(-0.4)],
+    [...Array(6).fill(-0.5),...Array(6).fill(-0.5), ...Array(4).fill(1.6)],
+  ];
+  const b3 = [0.0, 0.0, 0.4];
+
+  return { W1, b1, W2, b2, W3, b3 };
 }
 
-function forward(state: number[], w: Weights): ForwardResult {
-  const h1 = w.W1.map((row, i) =>
-    row.reduce((s, wi, j) => s + wi * (state[j] ?? 0), 0) + w.b1[i]
-  );
-  const h1r = h1.map(relu);
+// ── Forward pass ───────────────────────────────────────────────────────────
+interface FwdResult {
+  h1pre: number[]; h1: number[];
+  h2pre: number[]; h2: number[];
+  logits: number[]; probs: number[];
+}
 
-  const h2 = w.W2.map((row, i) =>
-    row.reduce((s, wi, j) => s + wi * h1r[j], 0) + w.b2[i]
-  );
-  const h2r = h2.map(relu);
+function forward(state: number[], w: Weights): FwdResult {
+  const h1pre = w.W1.map((row, i) =>
+    row.reduce((s, wi, j) => s + wi * (state[j] ?? 0), 0) + w.b1[i]);
+  const h1 = h1pre.map(relu);
+
+  const h2pre = w.W2.map((row, i) =>
+    row.reduce((s, wi, j) => s + wi * h1[j], 0) + w.b2[i]);
+  const h2 = h2pre.map(relu);
 
   const logits = w.W3.map((row, i) =>
-    row.reduce((s, wi, j) => s + wi * h2r[j], 0) + w.b3[i]
-  );
+    row.reduce((s, wi, j) => s + wi * h2[j], 0) + w.b3[i]);
   const probs = softmax(logits);
-  return { h1, h1r, h2, h2r, logits, probs };
+
+  return { h1pre, h1, h2pre, h2, logits, probs };
 }
 
-// ── REINFORCE policy gradient update ─────────────────────────────────────────
-// Updates weights using the REINFORCE algorithm with entropy bonus
-function policyGradientUpdate(
-  w: Weights,
-  experience: Experience[]
-): Weights {
-  if (experience.length < 4) return w;
-
-  // Clone weights
+// ── REINFORCE gradient update ──────────────────────────────────────────────
+function updateWeights(w: Weights, batch: Experience[]): Weights {
+  // Deep-clone weights
   const nW1 = w.W1.map(r => [...r]);
   const nb1 = [...w.b1];
   const nW2 = w.W2.map(r => [...r]);
@@ -176,183 +150,151 @@ function policyGradientUpdate(
   const nW3 = w.W3.map(r => [...r]);
   const nb3 = [...w.b3];
 
-  for (const exp of experience) {
-    const f = forward(exp.state, w);
-    const { h1r, h2r, probs } = f;
+  const clip = (v: number) => Math.max(-1.5, Math.min(1.5, v));
 
-    // Reward with discount (TD-style estimate)
-    const nextF = forward(exp.nextState, w);
-    const nextVal = exp.done ? 0 : GAMMA * Math.max(...nextF.probs);
-    const advantage = exp.reward + nextVal - probs[exp.action];
-    const adv = Math.max(-2, Math.min(2, advantage)); // clip gradient
+  for (const exp of batch) {
+    const f    = forward(exp.state, w);
+    const { h1, h1pre, h2, h2pre, probs } = f;
 
-    // Entropy bonus gradient: encourages exploration
-    const entropy = -probs.reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0);
+    // TD advantage
+    const nextV   = GAMMA * Math.max(...forward(exp.nextState, w).probs);
+    const adv     = Math.max(-2, Math.min(2, exp.reward + nextV - probs[exp.action]));
 
-    // Output layer gradient (dL/dlogits)
+    // Entropy
+    const entropy = -probs.reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0);
+
+    // Output-layer gradient (policy grad + entropy bonus)
     const dLogits = probs.map((p, k) => {
-      const onehot = k === exp.action ? 1 : 0;
-      const policyGrad = -adv * (onehot - p);
-      const entropyGrad = -ENTROPY_COEFF * (-Math.log(p + 1e-8) - entropy);
-      return policyGrad + entropyGrad;
+      const pg = -adv * ((k === exp.action ? 1 : 0) - p);
+      const eg = -ENTROPY_C * (-Math.log(p + 1e-8) - entropy);
+      return pg + eg;
     });
 
-    // Update W3, b3
+    // W3, b3
     for (let k = 0; k < OUTPUT_DIM; k++) {
-      for (let j = 0; j < H2_DIM; j++) {
-        nW3[k][j] -= LR * dLogits[k] * h2r[j];
-      }
-      nb3[k] -= LR * dLogits[k];
+      for (let j = 0; j < H2_DIM; j++) nW3[k][j] = clip(nW3[k][j] - LR * dLogits[k] * h2[j]);
+      nb3[k] = clip(nb3[k] - LR * dLogits[k]);
     }
 
-    // Backprop to h2
-    const dH2r = Array(H2_DIM).fill(0);
-    for (let j = 0; j < H2_DIM; j++) {
-      for (let k = 0; k < OUTPUT_DIM; k++) {
-        dH2r[j] += w.W3[k][j] * dLogits[k];
-      }
-    }
-    const dH2 = dH2r.map((d, j) => d * reluGrad(f.h2[j]));
+    // δh2
+    const dh2 = Array(H2_DIM).fill(0).map((_, j) =>
+      w.W3.reduce((s, row, k) => s + row[j] * dLogits[k], 0) * reluGrad(h2pre[j])
+    );
 
-    // Update W2, b2
+    // W2, b2
     for (let i = 0; i < H2_DIM; i++) {
-      for (let j = 0; j < H1_DIM; j++) {
-        nW2[i][j] -= LR * dH2[i] * h1r[j];
-      }
-      nb2[i] -= LR * dH2[i];
+      for (let j = 0; j < H1_DIM; j++) nW2[i][j] = clip(nW2[i][j] - LR * dh2[i] * h1[j]);
+      nb2[i] = clip(nb2[i] - LR * dh2[i]);
     }
 
-    // Backprop to h1
-    const dH1r = Array(H1_DIM).fill(0);
-    for (let j = 0; j < H1_DIM; j++) {
-      for (let i = 0; i < H2_DIM; i++) {
-        dH1r[j] += w.W2[i][j] * dH2[i];
-      }
-    }
-    const dH1 = dH1r.map((d, j) => d * reluGrad(f.h1[j]));
+    // δh1
+    const dh1 = Array(H1_DIM).fill(0).map((_, j) =>
+      w.W2.reduce((s, row, i) => s + row[j] * dh2[i], 0) * reluGrad(h1pre[j])
+    );
 
-    // Update W1, b1
+    // W1, b1
     for (let i = 0; i < H1_DIM; i++) {
-      for (let j = 0; j < INPUT_DIM; j++) {
-        nW1[i][j] -= LR * dH1[i] * (exp.state[j] ?? 0);
-      }
-      nb1[i] -= LR * dH1[i];
+      for (let j = 0; j < INPUT_DIM; j++) nW1[i][j] = clip(nW1[i][j] - LR * dh1[i] * (exp.state[j] ?? 0));
+      nb1[i] = clip(nb1[i] - LR * dh1[i]);
     }
   }
 
-  // Gradient clipping (prevents exploding gradients)
-  const clip = (v: number) => Math.max(-1.5, Math.min(1.5, v));
-  return {
-    W1: nW1.map(r => r.map(clip)), b1: nb1.map(clip),
-    W2: nW2.map(r => r.map(clip)), b2: nb2.map(clip),
-    W3: nW3.map(r => r.map(clip)), b3: nb3.map(clip),
-  };
+  return { W1: nW1, b1: nb1, W2: nW2, b2: nb2, W3: nW3, b3: nb3 };
 }
 
-// ── State vector (14 features) ────────────────────────────────────────────────
-// [score, conf, imbal, proxPx, micro, mom, volDir, rsi, sprd, wallImb,
-//  atrNorm, probEntropy, recentWinRate, momentumStrength]
-function buildStateArray(v: InstitutionalVerdictV2 | null, m: BookMetrics, ctx: AgentContext): number[] {
-  const spread = Math.min(m.spreadPct / 0.1, 1);
-  const micro  = m.microPrice && m.mid
-    ? Math.max(-1, Math.min(1, (m.microPrice - m.mid) / (m.mid || 1) * 100))
-    : 0;
+// ── State vector (14 features) ─────────────────────────────────────────────
+function buildState(
+  v: InstitutionalVerdictV2 | null,
+  m: BookMetrics,
+  recentWR: number,
+  recentProbs: ActionProbs | null
+): number[] {
+  // Feature 11: entropy of last decision (high=uncertain, low=confident)
+  const entropy = recentProbs
+    ? -([recentProbs.long, recentProbs.short, recentProbs.hold]
+        .reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0))
+    : Math.log(3);
+  const normEntropy = clamp01(entropy / Math.log(3));
+
+  // Feature 10: ATR proxy from spread
+  const atrProxy = clamp01(m.spreadPct / 0.05);
+
+  // Feature 8: spread normalised (raw spreadPct / 0.1 → typical BTC spread ~0.002%)
+  const spread = clamp01(m.spreadPct / 0.1);
 
   if (v) {
-    // Entropy of recent decisions (high = uncertain agent, low = confident)
-    const probs = ctx.recentProbs.length > 0 ? ctx.recentProbs[0] : null;
-    const entropy = probs
-      ? -([probs.long, probs.short, probs.hold].reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0))
-      : Math.log(3);
-    const normalizedEntropy = entropy / Math.log(3); // 0..1
-
-    // Momentum strength: absolute value of momentum
-    const momentumStrength = Math.abs(v.components.momentum);
-
-    // ATR normalized (if available from bookMetrics spread as proxy)
-    const atrNorm = Math.min(1, m.spreadPct / 0.05);
-
     return [
-      v.score / 100,
-      v.confidence / 100,
-      v.components.bookImbalance,
-      v.components.proximityPressure,
-      v.components.microDrift,
-      v.components.momentum,
-      v.components.volumeTrend,
-      (v.components.rsiPenalty + 0.4) / 0.8, // normalize to [0,1]
-      spread,
-      v.components.wallPressure,
-      atrNorm,
-      normalizedEntropy,
-      ctx.recentWinRate,
-      momentumStrength,
+      clampN1(v.score / 100),                                   // 0 score
+      clamp01(v.confidence / 100),                              // 1 confidence
+      clampN1(v.components.bookImbalance),                      // 2 bookImbalance
+      clampN1(v.components.proximityPressure),                  // 3 proximityPressure
+      clampN1(v.components.microDrift),                         // 4 microDrift
+      clampN1(v.components.momentum),                           // 5 momentum
+      clampN1(v.components.volumeTrend),                        // 6 volumeTrend
+      clamp01((v.components.rsiPenalty + 0.4) / 0.8),           // 7 rsiPenalty → [0,1]
+      spread,                                                    // 8 spread
+      clampN1(v.components.wallPressure),                       // 9 wallPressure
+      atrProxy,                                                  // 10 ATR proxy
+      normEntropy,                                               // 11 entropy
+      clamp01(recentWR),                                         // 12 recent win rate
+      clamp01(Math.abs(v.components.momentum)),                  // 13 momentum strength
     ];
   }
 
-  // Partial state from book metrics alone
-  const vwapDrift = m.mid > 0 ? Math.max(-1, Math.min(1, (m.vwapBid - m.vwapAsk) / m.mid)) : 0;
+  // Partial state (no verdict yet — book-only)
+  const microDrift = m.mid > 0
+    ? clampN1((m.microPrice - m.mid) / Math.max(m.spread, m.mid * 1e-6) * 2)
+    : 0;
+  const vwapPressure = m.mid > 0
+    ? clampN1((m.vwapBid - m.vwapAsk) / m.mid)
+    : 0;
+
   return [
-    0, 0, m.imbalance, vwapDrift, micro,
-    0, 0, 0.5, spread, m.imbalance * 0.5,
-    Math.min(1, m.spreadPct / 0.05), Math.log(3) / Math.log(3),
-    ctx.recentWinRate, 0,
+    0,                           // 0  score unknown
+    0,                           // 1  confidence unknown
+    clampN1(m.imbalance),        // 2  bookImbalance
+    vwapPressure,                // 3  proximityPressure proxy
+    microDrift,                  // 4  microDrift
+    0,                           // 5  momentum unknown
+    0,                           // 6  volumeTrend unknown
+    0.5,                         // 7  rsiPenalty neutral
+    spread,                      // 8  spread
+    clampN1(m.imbalance * 0.5),  // 9  wallPressure proxy
+    atrProxy,                    // 10 ATR proxy
+    normEntropy,                 // 11 entropy
+    clamp01(recentWR),           // 12 recent win rate
+    0,                           // 13 momentum strength unknown
   ];
 }
 
-interface AgentContext {
-  recentProbs: ActionProbs[];
-  recentWinRate: number;
-  totalDecisions: number;
-  wins: number;
-}
-
-// ── Performance tracker ────────────────────────────────────────────────────────
-interface PerfMetrics {
-  totalTrades: number;
-  wins: number;
-  losses: number;
-  totalPnl: number;
-  recentPnls: number[];
-  streak: number;
-  streakType: "win" | "loss" | "none";
-}
-
-// ── Decision from probs ────────────────────────────────────────────────────────
-function decideAction(probs: ActionProbs, explorationRate: number): { action: RLAction; confidence: number; explorationBonus: number } {
-  // ε-greedy exploration with temperature annealing
-  const rand = Math.random();
+// ── Decision from forward-pass probs ──────────────────────────────────────
+function decide(
+  probs: number[],
+  explorationRate: number
+): { action: RLAction; confidence: number; explored: boolean } {
+  const [pLong, pShort, pHold] = probs;
   let action: RLAction;
-  let explorationBonus = 0;
+  let explored = false;
 
-  if (rand < explorationRate) {
-    // Explore: sample from probability distribution (not greedy)
-    const r2 = Math.random();
-    action = r2 < probs.long ? "LONG" : r2 < probs.long + probs.short ? "SHORT" : "HOLD";
-    explorationBonus = 1;
+  if (Math.random() < explorationRate) {
+    // Sample from distribution (softmax exploration)
+    const r = Math.random();
+    action = r < pLong ? "LONG" : r < pLong + pShort ? "SHORT" : "HOLD";
+    explored = true;
   } else {
-    const max = Math.max(probs.long, probs.short, probs.hold);
-    action = max === probs.long ? "LONG" : max === probs.short ? "SHORT" : "HOLD";
+    const max = Math.max(pLong, pShort, pHold);
+    action = max === pLong ? "LONG" : max === pShort ? "SHORT" : "HOLD";
   }
 
-  const entropy = -([probs.long, probs.short, probs.hold]
-    .reduce((s, p) => s + (p > 0 ? p * Math.log(p) : 0), 0));
-  const maxEntropy = Math.log(3);
-  const certainty = 1 - entropy / maxEntropy;
-  const pAction = action === "LONG" ? probs.long : action === "SHORT" ? probs.short : probs.hold;
-  const confidence = Math.round(pAction * 100 * (0.6 + 0.4 * certainty));
+  const pAct = action === "LONG" ? pLong : action === "SHORT" ? pShort : pHold;
+  const ent  = -([pLong, pShort, pHold].reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0));
+  const certainty = 1 - ent / Math.log(3);
+  const confidence = Math.round(pAct * 100 * (0.6 + 0.4 * certainty));
 
-  return { action, confidence, explorationBonus };
+  return { action, confidence, explored };
 }
 
-// ── State map for display ─────────────────────────────────────────────────────
-function buildStateMap(v: InstitutionalVerdictV2 | null, m: BookMetrics, ctx: AgentContext) {
-  const arr = buildStateArray(v, m, ctx);
-  const keys = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr"];
-  return keys.map((k, i) => ({ k, v: arr[i] ?? 0 }));
-}
-
-// ── Main Component ─────────────────────────────────────────────────────────────
+// ── Component ──────────────────────────────────────────────────────────────
 export function RLAgentPanel({
   verdict,
   metrics,
@@ -360,121 +302,114 @@ export function RLAgentPanel({
   verdict: InstitutionalVerdictV2 | null;
   metrics: BookMetrics | null;
 }) {
-  const [active, setActive] = useState(false);
-  const [thinking, setThinking] = useState(false);
-  const [current, setCurrent] = useState<AgentDecision | null>(null);
-  const [log, setLog] = useState<AgentDecision[]>([]);
-  const [perf, setPerf] = useState<PerfMetrics>({
-    totalTrades: 0, wins: 0, losses: 0, totalPnl: 0, recentPnls: [], streak: 0, streakType: "none",
-  });
-  const [learningStep, setLearningStep] = useState(0);
-  const [explorationRate, setExplorationRate] = useState(0.15); // starts higher, anneals down
+  // ── display state ────────────────────────────────────────────────────────
+  const [active,       setActive]       = useState(false);
+  const [thinking,     setThinking]     = useState(false);
+  const [current,      setCurrent]      = useState<AgentDecision | null>(null);
+  const [log,          setLog]          = useState<AgentDecision[]>([]);
+  const [dispExpl,     setDispExpl]     = useState(INIT_EXPL);      // display only
+  const [dispStep,     setDispStep]     = useState(0);              // display only
+  const [dispWR,       setDispWR]       = useState(0);              // display only
+  const [dispTrades,   setDispTrades]   = useState(0);              // display only
 
-  const weightsRef  = useRef<Weights>(buildInitialWeights());
-  const replayRef   = useRef<Experience[]>([]);
-  const tickRef     = useRef(0);
-  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastDecRef  = useRef<{ state: number[]; action: number; price: number } | null>(null);
-  const contextRef  = useRef<AgentContext>({
-    recentProbs: [], recentWinRate: 0.5, totalDecisions: 0, wins: 0,
-  });
+  // ── mutable refs (no re-render side-effects) ──────────────────────────
+  const weightsRef   = useRef<Weights>(buildInitialWeights());
+  const replayRef    = useRef<Experience[]>([]);
+  const tickRef      = useRef(0);
+  const stepRef      = useRef(0);         // learning steps
+  const winRef       = useRef(0);         // wins
+  const tradeRef     = useRef(0);         // total trades evaluated
+  const explRef      = useRef(INIT_EXPL); // live exploration rate
+  const lastRef      = useRef<{ state: number[]; action: number; price: number } | null>(null);
+  const probsRef     = useRef<ActionProbs | null>(null);          // last probs for state
+  const timerRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Sync props → refs so evaluate() always reads current values
+  const verdictRef = useRef(verdict);
+  const metricsRef = useRef(metrics);
+  useEffect(() => { verdictRef.current  = verdict;  }, [verdict]);
+  useEffect(() => { metricsRef.current  = metrics;  }, [metrics]);
+
+  // ── core evaluation (no deps → stable identity throughout lifecycle) ──
   const evaluate = useCallback(() => {
-    if (!metrics) return;
+    const m = metricsRef.current;
+    const v = verdictRef.current;
+    if (!m) return;
+
     setThinking(true);
 
+    // Use setTimeout so we don't block the websocket event loop
     setTimeout(() => {
-      const ctx = contextRef.current;
+      const wr = tradeRef.current > 0 ? winRef.current / tradeRef.current : 0.5;
 
-      // ── Compute reward from previous decision ─────────────────────────────
-      if (lastDecRef.current && metrics.mid) {
-        const prev = lastDecRef.current;
-        const priceDelta = (metrics.mid - prev.price) / prev.price;
+      // ── 1. compute reward from previous decision ────────────────────
+      if (lastRef.current && m.mid) {
+        const prev    = lastRef.current;
+        const delta   = (m.mid - prev.price) / prev.price;
         let reward = 0;
-        if (prev.action === 0)      reward = priceDelta * 10; // LONG
-        else if (prev.action === 1) reward = -priceDelta * 10; // SHORT
-        else reward = Math.max(0, 0.05 - Math.abs(priceDelta) * 5); // HOLD: reward stillness
+        if      (prev.action === 0) reward =  delta * 10;        // LONG
+        else if (prev.action === 1) reward = -delta * 10;        // SHORT
+        else                        reward = Math.max(0, 0.05 - Math.abs(delta) * 5); // HOLD
 
-        const newState = buildStateArray(verdict, metrics, ctx);
-        const exp: Experience = {
-          state: prev.state, action: prev.action, reward,
-          nextState: newState, done: false,
-        };
-        replayRef.current = [exp, ...replayRef.current].slice(0, MAX_REPLAY);
+        const newState = buildState(v, m, wr, probsRef.current);
+        replayRef.current = [
+          { state: prev.state, action: prev.action, reward, nextState: newState },
+          ...replayRef.current,
+        ].slice(0, MAX_REPLAY);
 
-        // Online learning: update weights from mini-batch
-        if (replayRef.current.length >= REPLAY_BATCH) {
-          // Sample random mini-batch
+        // mini-batch gradient update
+        if (replayRef.current.length >= BATCH_SIZE) {
           const shuffled = [...replayRef.current].sort(() => Math.random() - 0.5);
-          const batch = shuffled.slice(0, REPLAY_BATCH);
-          weightsRef.current = policyGradientUpdate(weightsRef.current, batch);
-          setLearningStep(s => s + 1);
+          weightsRef.current = updateWeights(weightsRef.current, shuffled.slice(0, BATCH_SIZE));
+          stepRef.current += 1;
 
-          // Update performance tracking
           const isWin = reward > 0.01;
-          const isLoss = reward < -0.01;
-          ctx.wins += isWin ? 1 : 0;
-          ctx.totalDecisions += 1;
-          ctx.recentWinRate = ctx.wins / ctx.totalDecisions;
+          if (isWin) winRef.current++;
+          tradeRef.current++;
 
-          setPerf(p => {
-            const newPnls = [reward, ...p.recentPnls].slice(0, 20);
-            const newTotal = p.totalTrades + 1;
-            const newWins = p.wins + (isWin ? 1 : 0);
-            const newLosses = p.losses + (isLoss ? 1 : 0);
-            let streak = p.streak;
-            let streakType = p.streakType;
-            if (isWin) {
-              streak = p.streakType === "win" ? streak + 1 : 1;
-              streakType = "win";
-            } else if (isLoss) {
-              streak = p.streakType === "loss" ? streak + 1 : 1;
-              streakType = "loss";
-            }
-            return { totalTrades: newTotal, wins: newWins, losses: newLosses,
-              totalPnl: p.totalPnl + reward, recentPnls: newPnls, streak, streakType };
-          });
+          // Anneal exploration
+          explRef.current = Math.max(MIN_EXPL, explRef.current * EXPL_DECAY);
+
+          // Update display state (batched, low-frequency)
+          if (stepRef.current % 5 === 0) {
+            setDispStep(stepRef.current);
+            setDispExpl(explRef.current);
+            setDispWR(tradeRef.current > 0 ? winRef.current / tradeRef.current : 0);
+            setDispTrades(tradeRef.current);
+          }
         }
-
-        // Anneal exploration rate (less exploration over time)
-        setExplorationRate(prev => Math.max(0.02, prev * 0.998));
       }
 
-      // ── Forward pass ──────────────────────────────────────────────────────
-      const state = buildStateArray(verdict, metrics, ctx);
+      // ── 2. forward pass with current weights ───────────────────────
+      const state  = buildState(v, m, wr, probsRef.current);
       const result = forward(state, weightsRef.current);
-      const [pLong, pShort, pHold] = result.probs;
-      const probs: ActionProbs = { long: pLong, short: pShort, hold: pHold };
-      const { action, confidence, explorationBonus } = decideAction(probs, explorationRate);
+      const probs: ActionProbs = { long: result.probs[0], short: result.probs[1], hold: result.probs[2] };
+      const { action, confidence, explored } = decide(result.probs, explRef.current);
 
-      // Update context
-      ctx.recentProbs = [probs, ...ctx.recentProbs].slice(0, 5);
+      // Store for next reward computation
+      probsRef.current = probs;
+      lastRef.current  = { state, action: action === "LONG" ? 0 : action === "SHORT" ? 1 : 2, price: m.mid };
 
       tickRef.current += 1;
       const decision: AgentDecision = {
         action, probs, confidence,
-        score: verdict?.score ?? 0,
+        score:     v?.score ?? 0,
         timestamp: Date.now(),
-        entry: metrics.mid,
-        tick: tickRef.current,
-        stateArr: state,
-        explorationBonus,
+        entry:     m.mid,
+        tick:      tickRef.current,
+        explorationBonus: explored,
       };
-
-      // Store for next reward computation
-      const actionIdx = action === "LONG" ? 0 : action === "SHORT" ? 1 : 2;
-      lastDecRef.current = { state, action: actionIdx, price: metrics.mid };
 
       setCurrent(decision);
       setLog(prev => [decision, ...prev].slice(0, 15));
       setThinking(false);
     }, 50);
-  }, [verdict, metrics, explorationRate]);
+  }, []); // ← empty deps: evaluate is stable, reads props via refs
 
+  // ── interval management ───────────────────────────────────────────────
   useEffect(() => {
     if (!active) {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       return;
     }
     evaluate();
@@ -482,22 +417,26 @@ export function RLAgentPanel({
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [active, evaluate]);
 
+  // ── reset on deactivate ───────────────────────────────────────────────
   useEffect(() => {
     if (!active) {
-      setCurrent(null);
-      setLog([]);
-      tickRef.current = 0;
-      lastDecRef.current = null;
-      contextRef.current = { recentProbs: [], recentWinRate: 0.5, totalDecisions: 0, wins: 0 };
-      setLearningStep(0);
-      setExplorationRate(0.15);
-      setPerf({ totalTrades: 0, wins: 0, losses: 0, totalPnl: 0, recentPnls: [], streak: 0, streakType: "none" });
+      setCurrent(null); setLog([]);
+      tickRef.current = 0; stepRef.current = 0;
+      winRef.current = 0; tradeRef.current = 0;
+      explRef.current = INIT_EXPL;
+      lastRef.current = null; probsRef.current = null;
+      weightsRef.current = buildInitialWeights();
+      replayRef.current  = [];
+      setDispStep(0); setDispExpl(INIT_EXPL); setDispWR(0); setDispTrades(0);
     }
   }, [active]);
 
-  const stateItems = active && metrics ? buildStateMap(verdict, metrics, contextRef.current) : null;
+  const stateForDisplay = active && metrics
+    ? buildState(verdictRef.current, metrics, dispWR, probsRef.current)
+    : null;
+  const featureKeys = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr"];
+
   const noData = active && !metrics;
-  const winRate = perf.totalTrades > 0 ? (perf.wins / perf.totalTrades) * 100 : 0;
 
   return (
     <div className={cn(
@@ -523,10 +462,8 @@ export function RLAgentPanel({
               RL Agent — عين الحوت
               {active && (
                 <>
-                  <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 uppercase tracking-wider">
-                    LIVE
-                  </span>
-                  {learningStep > 0 && (
+                  <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 uppercase tracking-wider">LIVE</span>
+                  {dispStep > 0 && (
                     <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-bull/20 text-bull border border-bull/30 uppercase tracking-wider flex items-center gap-0.5">
                       <Brain className="size-2.5" /> Learning
                     </span>
@@ -538,8 +475,8 @@ export function RLAgentPanel({
               {active
                 ? thinking
                   ? "جاري التحليل..."
-                  : `تيكر #${tickRef.current} · خطوات التعلم: ${learningStep} · استكشاف: ${(explorationRate * 100).toFixed(0)}%`
-                : "PPO Neural Policy · 14-feature · 32-16-3 layers · Online REINFORCE"
+                  : `تيكر #${tickRef.current} · خطوات: ${dispStep} · ε=${(dispExpl * 100).toFixed(0)}%`
+                : "REINFORCE · 14 features · 32-16-3 · Online Learning"
               }
             </div>
           </div>
@@ -567,12 +504,12 @@ export function RLAgentPanel({
           </div>
         )}
 
-        {/* Decision cards */}
+        {/* Active content */}
         {active && !noData && (
           <>
+            {/* Main decision cards */}
             <div className="grid grid-cols-3 gap-3">
-              <DecisionCard action={current?.action ?? null} thinking={thinking}
-                exploration={current?.explorationBonus === 1} />
+              <DecisionCard action={current?.action ?? null} thinking={thinking} explored={current?.explorationBonus} />
               <ConfidenceCard confidence={current?.confidence ?? null} thinking={thinking} />
               <ScoreCard score={current?.score ?? null} thinking={thinking} />
             </div>
@@ -580,24 +517,22 @@ export function RLAgentPanel({
             {/* Probability bars */}
             {current && <ProbBars probs={current.probs} thinking={thinking} />}
 
-            {/* Performance metrics */}
-            {perf.totalTrades >= 2 && (
+            {/* Performance strip */}
+            {dispTrades >= 2 && (
               <div className="rounded-xl border border-border bg-secondary/20 p-3 grid grid-cols-4 gap-2 text-center">
-                <PerfCell label="الصفقات" value={perf.totalTrades.toString()} />
-                <PerfCell label="WinRate"
-                  value={`${winRate.toFixed(0)}%`}
-                  color={winRate >= 55 ? "text-bull" : winRate >= 45 ? "text-gold" : "text-bear"} />
-                <PerfCell label="PnL الحي"
-                  value={`${perf.totalPnl >= 0 ? "+" : ""}${(perf.totalPnl * 100).toFixed(2)}%`}
-                  color={perf.totalPnl >= 0 ? "text-bull" : "text-bear"} />
-                <PerfCell label={`سلسلة`}
-                  value={perf.streak > 1 ? `${perf.streak}${perf.streakType === "win" ? "✓" : "✗"}` : "-"}
-                  color={perf.streakType === "win" ? "text-bull" : perf.streakType === "loss" ? "text-bear" : ""} />
+                <MiniStat label="الصفقات" value={String(dispTrades)} />
+                <MiniStat label="WinRate"
+                  value={`${(dispWR * 100).toFixed(0)}%`}
+                  color={dispWR >= 0.55 ? "text-bull" : dispWR >= 0.45 ? "text-gold" : "text-bear"} />
+                <MiniStat label="خطوات التعلم" value={String(dispStep)} color="text-primary" />
+                <MiniStat label="استكشاف"
+                  value={`${(dispExpl * 100).toFixed(1)}%`}
+                  color={dispExpl < 0.05 ? "text-bull" : "text-muted-foreground"} />
               </div>
             )}
 
             {/* State vector */}
-            {stateItems && (
+            {stateForDisplay && (
               <div className="rounded-xl border border-border bg-secondary/20 p-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -605,21 +540,21 @@ export function RLAgentPanel({
                     State Vector
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] mono text-gold">ε={( explorationRate * 100).toFixed(1)}%</span>
+                    <span className="text-[10px] mono text-gold">ε={( dispExpl * 100).toFixed(1)}%</span>
                     <span className="text-[10px] mono bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 rounded-full">
-                      {stateItems.length} features
+                      {INPUT_DIM} features
                     </span>
                   </div>
                 </div>
                 <div className="grid grid-cols-7 gap-1">
-                  {stateItems.map(({ k, v }) => (
-                    <FeatureCell key={k} name={k} value={v} />
+                  {featureKeys.map((k, i) => (
+                    <FeatureCell key={k} name={k} value={stateForDisplay[i] ?? 0} />
                   ))}
                 </div>
-                {learningStep > 0 && (
+                {dispStep > 0 && (
                   <div className="flex items-center gap-1.5 text-[10px] text-bull mt-1">
                     <Brain className="size-3" />
-                    <span>خطوات تدريب: {learningStep} · عينات الذاكرة: {replayRef.current.length}/{MAX_REPLAY}</span>
+                    <span>خطوات تدريب: {dispStep} · ذاكرة: {replayRef.current.length}/{MAX_REPLAY}</span>
                   </div>
                 )}
               </div>
@@ -634,7 +569,11 @@ export function RLAgentPanel({
                 </div>
                 <div className="space-y-1 max-h-48 overflow-y-auto rounded-xl border border-border bg-secondary/10 p-2">
                   {log.map(d => (
-                    <LogRow key={`${d.tick}-${d.timestamp}`} decision={d} isLatest={d.tick === current?.tick} />
+                    <LogRow
+                      key={`${d.tick}-${d.timestamp}`}
+                      decision={d}
+                      isLatest={d.tick === current?.tick}
+                    />
                   ))}
                 </div>
               </div>
@@ -651,7 +590,7 @@ export function RLAgentPanel({
             <div>
               <div className="text-sm font-semibold">اضغط "تفعيل الوكيل" للبدء</div>
               <div className="text-[11px] text-muted-foreground mt-0.5 max-w-xs mx-auto">
-                وكيل تعزيزي حقيقي (REINFORCE) بذاكرة تجارب وتعلم تلقائي من كل قرار
+                وكيل تعزيزي حقيقي (REINFORCE) بذاكرة تجارب وتعلم تلقائي متواصل
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
@@ -666,16 +605,16 @@ export function RLAgentPanel({
   );
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────────
+// ── Sub-components ─────────────────────────────────────────────────────────
 function ArchBadge({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
     <div className="rounded-lg border border-border bg-card/40 px-2 py-1.5 flex items-center gap-1.5 justify-center text-muted-foreground">
-      {icon}{label}
+      {icon} {label}
     </div>
   );
 }
 
-function PerfCell({ label, value, color }: { label: string; value: string; color?: string }) {
+function MiniStat({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div className="rounded-lg border border-border bg-card/40 py-1.5">
       <div className="text-[9px] text-muted-foreground uppercase tracking-wider">{label}</div>
@@ -684,11 +623,12 @@ function PerfCell({ label, value, color }: { label: string; value: string; color
   );
 }
 
-function DecisionCard({ action, thinking, exploration }:
-  { action: RLAction | null; thinking: boolean; exploration?: boolean }) {
+function DecisionCard({
+  action, thinking, explored,
+}: { action: RLAction | null; thinking: boolean; explored?: boolean }) {
   const cfg = {
-    LONG:  { color: "text-bull", bg: "bg-bull/8 border-bull/30",  Icon: TrendingUp,  ar: "شراء LONG"  },
-    SHORT: { color: "text-bear", bg: "bg-bear/8 border-bear/30",  Icon: TrendingDown, ar: "بيع SHORT" },
+    LONG:  { color: "text-bull", bg: "bg-bull/8 border-bull/30",  Icon: TrendingUp,   ar: "شراء LONG"  },
+    SHORT: { color: "text-bear", bg: "bg-bear/8 border-bear/30",  Icon: TrendingDown, ar: "بيع SHORT"  },
     HOLD:  { color: "text-gold", bg: "bg-gold/8 border-gold/30",  Icon: Minus,        ar: "انتظار HOLD"},
   };
   const c = action ? cfg[action] : null;
@@ -697,8 +637,8 @@ function DecisionCard({ action, thinking, exploration }:
       "rounded-xl border p-3 transition-all relative",
       thinking ? "animate-pulse bg-secondary/30 border-border" : c ? c.bg : "bg-card/40 border-border"
     )}>
-      {exploration && !thinking && (
-        <span className="absolute top-1 left-1 text-[8px] mono text-primary opacity-70">ε</span>
+      {explored && !thinking && (
+        <span className="absolute top-1 left-1 text-[8px] mono text-primary opacity-60">ε</span>
       )}
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">القرار</div>
       {c && !thinking ? (
@@ -719,8 +659,8 @@ function DecisionCard({ action, thinking, exploration }:
 function ConfidenceCard({ confidence, thinking }: { confidence: number | null; thinking: boolean }) {
   const color =
     confidence === null ? "text-muted-foreground"
-    : confidence >= 70 ? "text-bull"
-    : confidence >= 50 ? "text-gold"
+    : confidence >= 70  ? "text-bull"
+    : confidence >= 50  ? "text-gold"
     : "text-bear";
   return (
     <div className="rounded-xl border border-border bg-card/40 p-3">
@@ -766,8 +706,8 @@ function ScoreCard({ score, thinking }: { score: number | null; thinking: boolea
 
 function ProbBars({ probs, thinking }: { probs: ActionProbs; thinking: boolean }) {
   const bars = [
-    { label: "LONG", value: probs.long, color: "bg-bull" },
-    { label: "HOLD", value: probs.hold, color: "bg-gold" },
+    { label: "LONG",  value: probs.long,  color: "bg-bull" },
+    { label: "HOLD",  value: probs.hold,  color: "bg-gold" },
     { label: "SHORT", value: probs.short, color: "bg-bear" },
   ];
   return (
@@ -804,14 +744,12 @@ function FeatureCell({ name, value }: { name: string; value: number }) {
 }
 
 function LogRow({ decision, isLatest }: { decision: AgentDecision; isLatest: boolean }) {
-  const time = new Date(decision.timestamp).toLocaleTimeString("ar", {
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
+  const time  = new Date(decision.timestamp).toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const color = { LONG: "text-bull", SHORT: "text-bear", HOLD: "text-gold" }[decision.action];
-  const bg = {
-    LONG: "bg-bull/5 border-bull/20",
+  const bg    = {
+    LONG:  "bg-bull/5 border-bull/20",
     SHORT: "bg-bear/5 border-bear/20",
-    HOLD: "bg-secondary/20 border-border/50",
+    HOLD:  "bg-secondary/20 border-border/50",
   }[decision.action];
   return (
     <div className={cn(
@@ -822,9 +760,7 @@ function LogRow({ decision, isLatest }: { decision: AgentDecision; isLatest: boo
       <span className={cn("font-black w-12 text-center", color)}>{decision.action}</span>
       <span className="text-muted-foreground w-14 text-center">{decision.confidence}%</span>
       <span className="text-muted-foreground">{fmtPrice(decision.entry)}</span>
-      {decision.explorationBonus === 1 && (
-        <span className="text-[8px] text-primary">ε</span>
-      )}
+      {decision.explorationBonus && <span className="text-[8px] text-primary w-3">ε</span>}
       <span className="text-muted-foreground text-[9px] w-10 text-left">#{decision.tick}</span>
     </div>
   );

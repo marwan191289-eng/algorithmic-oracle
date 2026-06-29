@@ -182,6 +182,8 @@ function SymbolView({
 }) {
   const { book, connected } = useLiveDepth(symbol);
   const { ticker, flash } = useLiveTicker(symbol);
+  const cvdStats = useCVD(book, book ? (book.bids[0]?.price + book.asks[0]?.price) / 2 : 0);
+
 
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);

@@ -499,6 +499,7 @@ function SymbolView({
 
           {/* OFI — Order Flow Imbalance Heatmap */}
           <Panel
+            minH="min-h-[420px]"
             icon={<GitCompare className="size-4 text-primary" />}
             title="OFI — خريطة حرارة تدفق الأوامر"
             extra={
@@ -525,6 +526,7 @@ function SymbolView({
           {/* SMC — Smart Money Concepts */}
           {smcAnalysis && (
             <Panel
+              minH="min-h-[300px]"
               icon={<GitCompare className="size-4 text-gold" />}
               title="SMC — بصمات الأموال الذكية"
               extra={
@@ -587,6 +589,34 @@ function SymbolView({
             </div>
           </div>
 
+          {/* Developer signature */}
+          <div className="mt-6 rounded-2xl border border-border/50 bg-card/20 px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="size-12 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center font-black text-primary text-xl select-none">
+                م
+              </div>
+              <div>
+                <div className="font-bold text-base">Marwan Negm</div>
+                <div className="text-[12px] text-muted-foreground mt-0.5">مطوّر منصة عين الحوت · WhaleEye</div>
+                <div className="text-[11px] mono text-muted-foreground/60 mt-0.5">Institutional Order-Flow Engine · Binance Live</div>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1.5 text-[10px] text-muted-foreground mono select-none">
+              <div className="flex items-center gap-1.5">
+                <span className="size-1.5 rounded-full bg-bull animate-pulse" />
+                <span>بيانات مباشرة · Binance WebSocket</span>
+              </div>
+              <div className="flex items-center gap-2 gap-y-1 flex-wrap justify-end">
+                {["RL Agent", "CVD", "OFI", "SMC", "Liquidity Zones", "Backtest"].map(tag => (
+                  <span key={tag} className="px-2 py-0.5 rounded-full bg-primary/8 border border-primary/15 text-primary/70 text-[9px] uppercase tracking-wider">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              <div className="text-[9px] opacity-50 mt-0.5">v3.0 · {new Date().getFullYear()}</div>
+            </div>
+          </div>
+
         </>
       )}
     </div>
@@ -616,15 +646,15 @@ function MetricCard({ label, value, tone }: { label: string; value: string; tone
 }
 
 function Panel({
-  icon, title, extra, children,
-}: { icon?: React.ReactNode; title: string; extra?: React.ReactNode; children: React.ReactNode }) {
+  icon, title, extra, children, minH,
+}: { icon?: React.ReactNode; title: string; extra?: React.ReactNode; children: React.ReactNode; minH?: string }) {
   return (
     <section className="rounded-2xl border border-border bg-card/40 overflow-hidden">
       <header className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-card/60 gap-2 flex-wrap">
         <div className="flex items-center gap-2 font-semibold text-sm">{icon}{title}</div>
         {extra}
       </header>
-      <div className="p-3">{children}</div>
+      <div className={cn("p-3", minH)} style={minH ? undefined : undefined}>{children}</div>
     </section>
   );
 }

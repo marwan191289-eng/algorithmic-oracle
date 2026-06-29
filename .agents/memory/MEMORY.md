@@ -1,4 +1,6 @@
 - [Zustand action ref pattern](zustand-action-refs.md) — never put Zustand action selectors in useEffect deps; use useRef + getState() instead
 - [Analysis algorithm upgrades](analysis-algorithm.md) — proximity imbalance, log-vol momentum, Python-aligned confidence (60% agreement + 40% quality) all live in analysis.ts
-- [RL Agent panel pattern](rl-agent-panel.md) — upgraded to 14-feature / 32-16-3 layers / REINFORCE with experience replay; weights update online via policyGradientUpdate
-- [Backtest engine v2](backtest-v2.md) — signalAt rewritten to use same weights as institutionalScoreV2; synthetic book from OHLCV; Sharpe/Sortino/Calmar/consecutive streaks added
+- [RL Agent panel pattern](rl-agent-panel.md) — Xavier init + 5-tick delayed reward queue (10s horizon); refs only, [] deps on evaluate
+- [Backtest engine v2](backtest-v2.md) — signalAt rewritten to use same weights as institutionalScoreV2; synthetic book from OHLCV; Sharpe/Sortino/Calmar added
+- [Liquidity zones v2](liquidity-zones-v2.md) — improved detectLiquidityZones: dual clustering (0.12% tight + 0.22% normal), volume z-score weighting, inducement detection, new fields: volumeScore/equalLevel/induced/zoneHigh/zoneLow
+- [CVD synthetic hook](cvd-hook.md) — useCVD computes synthetic CVD from book snapshots (aggTrade WS blocked in Replit); blend 60% absorption + 40% price-direction signal; rawMid computed directly from book to avoid hook ordering issues in index.tsx

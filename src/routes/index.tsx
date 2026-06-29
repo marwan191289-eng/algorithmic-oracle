@@ -11,6 +11,8 @@ import {
   fmtUsd,
 } from "@/lib/binance";
 import { useLiveDepth, useLiveTicker } from "@/hooks/useBinance";
+import { useCVD } from "@/hooks/useCVD";
+import { CVDPanel } from "@/components/trading/CVDPanel";
 import {
   computeBookMetrics,
   computePriceMetrics,
@@ -34,7 +36,7 @@ import { useQualitySlopeAlert } from "@/hooks/useQualitySlopeAlert";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
 import { RLAgentPanel } from "@/components/trading/RLAgentPanel";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare, Activity } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -180,6 +182,11 @@ function SymbolView({
 }) {
   const { book, connected } = useLiveDepth(symbol);
   const { ticker, flash } = useLiveTicker(symbol);
+  // Compute mid directly from book (can't use metrics here — hooks must precede useMemo)
+  const rawMid = book
+    ? ((book.bids[0]?.price ?? 0) + (book.asks[0]?.price ?? 0)) / 2
+    : 0;
+  const cvdStats = useCVD(book, rawMid);
 
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
@@ -453,6 +460,34 @@ function SymbolView({
             <MetricCard label="VWAP بيع" value={fmtPrice(metrics.vwapAsk)} tone="bear" />
           </div>
 
+          {/* CVD — Cumulative Volume Delta */}
+          <Panel
+            icon={<Activity className="size-4 text-primary" />}
+            title="مؤشر CVD — دلتا حجم التداول التراكمي"
+            extra={
+              <div className="flex items-center gap-2">
+                {cvdStats.divergence && (
+                  <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-gold/40 text-gold bg-gold/10">
+                    ⚠ تباين
+                  </span>
+                )}
+                <span className={cn(
+                  "text-[10px] mono px-2 py-0.5 rounded-full border",
+                  cvdStats.trend === "bullish" ? "border-bull/40 text-bull bg-bull/10"
+                  : cvdStats.trend === "bearish" ? "border-bear/40 text-bear bg-bear/10"
+                  : "border-border text-muted-foreground"
+                )}>
+                  {cvdStats.trend === "bullish" ? "↑ شرائي"
+                   : cvdStats.trend === "bearish" ? "↓ بيعي"
+                   : "محايد"}
+                </span>
+                <span className="text-[10px] mono text-muted-foreground">من دفتر الأوامر</span>
+              </div>
+            }
+          >
+            <CVDPanel cvdStats={cvdStats} mid={rawMid} />
+          </Panel>
+
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
             <div id="walls-panel" className="scroll-mt-24">
@@ -476,7 +511,11 @@ function SymbolView({
               <Panel
                 icon={<Crosshair className="size-4 text-gold" />}
                 title="مناطق صيد الستوبات (السيولة)"
-                extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
+                extra={
+                  <span className="text-[10px] mono text-muted-foreground">
+                    قمم/قيعان متساوية · احتمال مُعاير بالحجم · {interval}
+                  </span>
+                }
               >
                 <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
               </Panel>

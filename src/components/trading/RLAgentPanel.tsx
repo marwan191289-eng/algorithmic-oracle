@@ -43,15 +43,14 @@ const IN   = 14;
 const H1   = 32;
 const H2   = 16;
 const OUT  = 3;
-const LR          = 0.003;
-const GAMMA       = 0.90;
-const ENTROPY_C   = 0.10;
-const BATCH       = 20;
-const REPLAY_MAX  = 600;
+const LR          = 0.004;
+const ENTROPY_C   = 0.08;
+const BATCH       = 24;
+const REPLAY_MAX  = 800;
 const REWARD_TICKS= 5;     // evaluate reward after 5 ticks (~10s)
-const INIT_EXPL   = 0.20;
-const MIN_EXPL    = 0.03;
-const EXPL_DECAY  = 0.997;
+const INIT_EXPL   = 0.22;
+const MIN_EXPL    = 0.04;
+const EXPL_DECAY  = 0.9985; // slower decay → more exploration
 
 // ── Math ───────────────────────────────────────────────────────────────────
 const relu = (x: number) => (x > 0 ? x : 0);
@@ -116,20 +115,28 @@ function fwd(s: number[], w: W): FWD {
 }
 
 // ── REINFORCE update ────────────────────────────────────────────────────────
+// Advantage is batch-normalised (reward - mean) / std — stable regardless of
+// reward scale. Gradient clip widened to ±2.0 to allow faster learning.
 function update(w: W, batch: Experience[]): W {
   const nW1 = w.W1.map(r => [...r]), nb1 = [...w.b1];
   const nW2 = w.W2.map(r => [...r]), nb2 = [...w.b2];
   const nW3 = w.W3.map(r => [...r]), nb3 = [...w.b3];
-  const clip = (v: number) => Math.max(-1.2, Math.min(1.2, v));
+  const clipG = (v: number) => Math.max(-2.0, Math.min(2.0, v)); // gradient clip
+  const clipW = (v: number) => Math.max(-3.0, Math.min(3.0, v)); // weight clip
+
+  // Batch-normalise rewards → stable advantage regardless of scale
+  const rewards = batch.map(e => e.reward);
+  const meanR = rewards.reduce((s, r) => s + r, 0) / rewards.length;
+  const varR  = rewards.reduce((s, r) => s + (r - meanR) ** 2, 0) / rewards.length;
+  const stdR  = Math.sqrt(varR) || 1;
 
   for (const ex of batch) {
     const f = fwd(ex.state, w);
     const { h1, h1p, h2, h2p, probs } = f;
 
-    // TD-style advantage with entropy regularisation
-    const nextV   = GAMMA * Math.max(...fwd(ex.nextState, w).probs);
-    const adv     = Math.max(-2.5, Math.min(2.5, ex.reward + nextV - probs[ex.action]));
-    const ent     = -probs.reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0);
+    // Normalised advantage + entropy regularisation
+    const adv = Math.max(-3, Math.min(3, (ex.reward - meanR) / stdR));
+    const ent = -probs.reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0);
     const dLogits = probs.map((p, k) => {
       const pg = -adv * ((k === ex.action ? 1 : 0) - p);
       const eg = -ENTROPY_C * (-Math.log(p + 1e-8) - ent);
@@ -137,20 +144,20 @@ function update(w: W, batch: Experience[]): W {
     });
 
     for (let k = 0; k < OUT; k++) {
-      for (let j = 0; j < H2; j++) nW3[k][j] = clip(nW3[k][j] - LR * dLogits[k] * h2[j]);
-      nb3[k] = clip(nb3[k] - LR * dLogits[k]);
+      for (let j = 0; j < H2; j++) nW3[k][j] = clipW(nW3[k][j] - clipG(LR * dLogits[k] * h2[j]));
+      nb3[k] = clipW(nb3[k] - clipG(LR * dLogits[k]));
     }
     const dh2 = Array(H2).fill(0).map((_, j) =>
       w.W3.reduce((s, row, k) => s + row[j] * dLogits[k], 0) * rgrad(h2p[j]));
     for (let i = 0; i < H2; i++) {
-      for (let j = 0; j < H1; j++) nW2[i][j] = clip(nW2[i][j] - LR * dh2[i] * h1[j]);
-      nb2[i] = clip(nb2[i] - LR * dh2[i]);
+      for (let j = 0; j < H1; j++) nW2[i][j] = clipW(nW2[i][j] - clipG(LR * dh2[i] * h1[j]));
+      nb2[i] = clipW(nb2[i] - clipG(LR * dh2[i]));
     }
     const dh1 = Array(H1).fill(0).map((_, j) =>
       w.W2.reduce((s, row, i) => s + row[j] * dh2[i], 0) * rgrad(h1p[j]));
     for (let i = 0; i < H1; i++) {
-      for (let j = 0; j < IN; j++) nW1[i][j] = clip(nW1[i][j] - LR * dh1[i] * (ex.state[j] ?? 0));
-      nb1[i] = clip(nb1[i] - LR * dh1[i]);
+      for (let j = 0; j < IN; j++) nW1[i][j] = clipW(nW1[i][j] - clipG(LR * dh1[i] * (ex.state[j] ?? 0)));
+      nb1[i] = clipW(nb1[i] - clipG(LR * dh1[i]));
     }
   }
   return { W1: nW1, b1: nb1, W2: nW2, b2: nb2, W3: nW3, b3: nb3 };
@@ -274,10 +281,21 @@ export function RLAgentPanel({
 
       for (const p of matured) {
         const priceDeltaPct = (m.mid - p.entry) / p.entry * 100;
+        // ATR-normalised reward via tanh → always in (-1, +1), scale-free.
+        // spreadPct is a volatility proxy: ATR ≈ 10–20× the bid-ask spread.
+        const volProxy = Math.max(m.spreadPct * 12, 0.003); // ~10–15× spread, min 0.003%
+        const normalized = priceDeltaPct / volProxy;
         let reward = 0;
-        if      (p.action === 0) reward =  priceDeltaPct;   // LONG
-        else if (p.action === 1) reward = -priceDeltaPct;   // SHORT
-        else                     reward = Math.max(0, 0.08 - Math.abs(priceDeltaPct) * 0.5); // HOLD
+        if (p.action === 0) {
+          // LONG: positive when price rose (risk-adjusted)
+          reward = Math.tanh(normalized);
+        } else if (p.action === 1) {
+          // SHORT: positive when price fell (risk-adjusted)
+          reward = Math.tanh(-normalized);
+        } else {
+          // HOLD: slight positive in calm markets; penalises missing a clear move
+          reward = Math.tanh(-Math.abs(normalized) * 0.6) + 0.12;
+        }
 
         const newState = buildState(v, m, wr, probsR.current);
         replay.current = [
@@ -286,11 +304,18 @@ export function RLAgentPanel({
         ].slice(0, REPLAY_MAX);
 
         if (replay.current.length >= BATCH) {
-          const shuffled = [...replay.current].sort(() => Math.random() - 0.5);
-          W.current = update(W.current, shuffled.slice(0, BATCH));
+          // Prioritised replay: sample high-|reward| experiences more often.
+          // Top 60% drawn from highest-|reward| pool; remaining 40% random.
+          const sorted = [...replay.current]
+            .sort((a, b) => Math.abs(b.reward) - Math.abs(a.reward));
+          const splitAt = Math.floor(sorted.length * 0.6);
+          const hi = sorted.slice(0, splitAt).sort(() => Math.random() - 0.5);
+          const lo = sorted.slice(splitAt).sort(() => Math.random() - 0.5);
+          const batchSamples = [...hi, ...lo].slice(0, BATCH);
+          W.current = update(W.current, batchSamples);
           stepR.current++;
 
-          if (reward > 0.005) winsR.current++;
+          if (reward > 0) winsR.current++;
           tradesR.current++;
           explR.current = Math.max(MIN_EXPL, explR.current * EXPL_DECAY);
 
@@ -398,7 +423,7 @@ export function RLAgentPanel({
                 ? thinking
                   ? "جاري التحليل..."
                   : `تيكر #${tickR.current} · خطوات: ${dispStep} · ε=${(dispExpl*100).toFixed(0)}% · أفق: ${REWARD_TICKS} تيكرات`
-                : "REINFORCE · Xavier init · أفق مكافأة 10s · ذاكرة تجارب"
+                : "REINFORCE · مكافأة مُعيَّرة-ATR · إعادة تجربة ذات أولوية · بيس لاين دُفعي"
               }
             </div>
           </div>
@@ -496,7 +521,7 @@ export function RLAgentPanel({
             <div>
               <div className="text-sm font-semibold">اضغط "تفعيل الوكيل" للبدء</div>
               <div className="text-[11px] text-muted-foreground mt-0.5 max-w-xs mx-auto">
-                وكيل تعزيزي حقيقي — Xavier init، أفق مكافأة ديناميكي 10s، ذاكرة تجارب
+                وكيل تعزيزي حقيقي — مكافأة معيَّرة-ATR، استكشاف ديناميكي، إعادة تجربة ذات أولوية
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">

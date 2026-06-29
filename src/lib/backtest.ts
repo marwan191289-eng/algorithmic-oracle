@@ -301,11 +301,14 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
   const logVolMom       = clamp(price.logVolMomentum, -1, 1);
   const volumeTrend     = clamp((Math.tanh(price.volumeTrend * 2) + logVolMom) / 2, -1, 1);
   const microDrift      = clamp(book.microDrift, -1, 1);
+  // Use user-configured RSI thresholds (previously hardcoded to 80/72/20/28)
+  const rsiOB8 = params.rsiOverbought - 8;
+  const rsiOS8 = params.rsiOversold + 8;
   const rsiPenalty =
-    price.rsi >= 80 ? -0.4 :
-    price.rsi >= 72 ? -0.2 :
-    price.rsi <= 20 ?  0.4 :
-    price.rsi <= 28 ?  0.2 : 0;
+    price.rsi >= params.rsiOverbought ? -0.4 :
+    price.rsi >= rsiOB8              ? -0.2 :
+    price.rsi <= params.rsiOversold  ?  0.4 :
+    price.rsi <= rsiOS8              ?  0.2 : 0;
   const spreadHealth = clamp(1 - price.volatility * 30, 0, 1);
 
   // IDENTICAL to institutionalScoreV2 Python-aligned weights:
@@ -338,6 +341,10 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
   // Aggressive entry: very strong signal overrides confidence requirement
   else if (score >= params.minScore + 20) side = "long";
   else if (score <= -(params.minScore + 20)) side = "short";
+
+  // ── Hard RSI filter: block entries in extreme RSI zones (uses user params) ──
+  if (side === "long"  && price.rsi >= params.rsiOverbought) side = null;
+  if (side === "short" && price.rsi <= params.rsiOversold)   side = null;
 
   // Reason string
   const parts: string[] = [];
@@ -402,16 +409,20 @@ export function runBacktest(
       const k = klines[j];
       if (sig.side === "long") {
         if (k.low <= stop)  { exitIdx = j; exitPrice = stop; reason = "sl"; break; }
-        if (k.high >= tp2 && params.partialExitPct <= 0) {
-          exitIdx = j; exitPrice = tp2; reason = "tp2"; break;
+        if (params.partialExitPct > 0) {
+          // Partial-exit mode: skip TP1, wait for full exit at TP2
+          if (k.high >= tp2) { exitIdx = j; exitPrice = tp2; reason = "tp2"; break; }
+        } else {
+          // Full exit at TP1 (rrTarget). TP2 only relevant with partial exits.
+          if (k.high >= tp)  { exitIdx = j; exitPrice = tp;  reason = "tp"; break; }
         }
-        if (k.high >= tp)   { exitIdx = j; exitPrice = tp;   reason = "tp"; break; }
       } else {
         if (k.high >= stop) { exitIdx = j; exitPrice = stop; reason = "sl"; break; }
-        if (k.low <= tp2 && params.partialExitPct <= 0) {
-          exitIdx = j; exitPrice = tp2; reason = "tp2"; break;
+        if (params.partialExitPct > 0) {
+          if (k.low <= tp2)  { exitIdx = j; exitPrice = tp2; reason = "tp2"; break; }
+        } else {
+          if (k.low <= tp)   { exitIdx = j; exitPrice = tp;  reason = "tp"; break; }
         }
-        if (k.low <= tp)    { exitIdx = j; exitPrice = tp;   reason = "tp"; break; }
       }
     }
 

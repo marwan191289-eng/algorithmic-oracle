@@ -15,6 +15,8 @@ import { useCVD } from "@/hooks/useCVD";
 import { CVDPanel } from "@/components/trading/CVDPanel";
 import { useOFI } from "@/hooks/useOFI";
 import { OFIHeatmap } from "@/components/trading/OFIHeatmap";
+import { detectSMC } from "@/lib/smc";
+import { SMCPanel } from "@/components/trading/SMCPanel";
 import {
   computeBookMetrics,
   computePriceMetrics,
@@ -236,6 +238,10 @@ function SymbolView({
   const zones = useMemo(
     () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid) : []),
     [klines, metrics]
+  );
+  const smcAnalysis = useMemo(
+    () => (klines ? detectSMC(klines) : null),
+    [klines]
   );
   const prevScoreRef = useRef<number | undefined>(undefined);
   const verdict = useMemo(() => {
@@ -515,6 +521,37 @@ function SymbolView({
           >
             <OFIHeatmap ofi={ofiStats} mid={rawMid} />
           </Panel>
+
+          {/* SMC — Smart Money Concepts */}
+          {smcAnalysis && (
+            <Panel
+              icon={<GitCompare className="size-4 text-gold" />}
+              title="SMC — بصمات الأموال الذكية"
+              extra={
+                <div className="flex items-center gap-2">
+                  <span className={cn(
+                    "text-[10px] mono px-2 py-0.5 rounded-full border",
+                    smcAnalysis.trend === "up"   ? "border-bull/40 text-bull bg-bull/10"
+                    : smcAnalysis.trend === "down" ? "border-bear/40 text-bear bg-bear/10"
+                    : "border-border text-muted-foreground"
+                  )}>
+                    {smcAnalysis.trend === "up" ? "↑ هيكل صاعد"
+                     : smcAnalysis.trend === "down" ? "↓ هيكل هابط"
+                     : "متذبذب"}
+                  </span>
+                  <span className="text-[10px] mono text-muted-foreground">
+                    BOS · CHOCH · FVG · OB · {interval}
+                  </span>
+                </div>
+              }
+            >
+              <SMCPanel
+                analysis={smcAnalysis}
+                currentPrice={metrics?.mid ?? rawMid}
+                interval={interval}
+              />
+            </Panel>
+          )}
 
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">

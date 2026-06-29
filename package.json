@@ -4,12 +4,13 @@
   "sideEffects": false,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "preflight": "node -e \"const fs=require('fs');const v='./node_modules/.bin/vite';if(!fs.existsSync(v)){process.stderr.write('\\n[preflight] node_modules missing or incomplete — run: npm install\\n\\n');process.exit(1)}else{process.stdout.write('[preflight] OK — vite found\\n')}\"",
+    "dev": "node ./node_modules/.bin/vite",
     "server": "node server/server.js",
     "dev:all": "concurrently \"npm run server\" \"npm run dev\"",
-    "build": "vite build",
-    "build:dev": "vite build --mode development",
-    "preview": "vite preview",
+    "build": "node ./node_modules/.bin/vite build",
+    "build:dev": "node ./node_modules/.bin/vite build --mode development",
+    "preview": "node ./node_modules/.bin/vite preview",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

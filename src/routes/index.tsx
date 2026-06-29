@@ -228,8 +228,8 @@ function SymbolView({
     [klines]
   );
   const zones = useMemo(
-    () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid) : []),
-    [klines, metrics]
+    () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid, { walls: walls ?? undefined }) : []),
+    [klines, metrics, walls]
   );
   const prevScoreRef = useRef<number | undefined>(undefined);
   const verdict = useMemo(() => {

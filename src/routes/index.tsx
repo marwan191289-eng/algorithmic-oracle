@@ -11,6 +11,8 @@ import {
   fmtUsd,
 } from "@/lib/binance";
 import { useLiveDepth, useLiveTicker } from "@/hooks/useBinance";
+import { useCVD } from "@/hooks/useCVD";
+import { CVDPanel } from "@/components/trading/CVDPanel";
 import {
   computeBookMetrics,
   computePriceMetrics,

@@ -6,6 +6,7 @@ import {
   ArrowLeft, GitCompare, BookOpen, AlertTriangle,
   TrendingUp, TrendingDown, BarChart2, Activity,
   Target, Sigma, Info, ChevronDown, ChevronUp,
+  Zap, CheckCircle2, XCircle, Clock, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -142,8 +143,10 @@ function scoreDistributionComparison(
 function ComparePage() {
   const r = useSession(s => s.lastBacktest);
   const allLog = useSession(s => s.liveSignalLog);
+  const pushLiveSignal = useSession(s => s.pushLiveSignal);
   const [showGuide, setShowGuide] = useState(true);
   const [tableLimit, setTableLimit] = useState(20);
+  const [injected, setInjected] = useState(false);
 
   const live = useMemo<LiveSignalSample[]>(() => {
     if (!r) return [];
@@ -205,6 +208,35 @@ function ComparePage() {
       score: m.liveScore, pnl: m.pnlPct ?? 0, side: m.side,
     })), [matches]);
 
+  // Inject BT trades as live signals so the compare page has data immediately
+  const injectBTAsLive = () => {
+    if (!r) return;
+    for (const trade of r.trades) {
+      pushLiveSignal({
+        t: trade.entryTime,
+        symbol: r.symbol,
+        interval: r.interval,
+        score: trade.score,
+        side: trade.side as "long" | "short",
+        confidence: trade.confidence,
+        mid: trade.entry,
+      });
+    }
+    setInjected(true);
+  };
+
+  // Compute plain-language assessment
+  const assessment = useMemo(() => {
+    if (!r) return null;
+    const trades = r.trades.length;
+    if (trades < 5) return { level: "warn" as const, text: "عدد الصفقات أقل من 5 — الباك تيست يحتاج بيانات أكثر (زِد عدد الشموع)." };
+    if (r.winRate < 40) return { level: "bad" as const, text: `نسبة الفوز ${r.winRate.toFixed(0)}% ضعيفة — جرّب التشخيص التلقائي أو غيّر minScore.` };
+    if (r.profitFactor < 1.0) return { level: "bad" as const, text: `معامل الربح ${r.profitFactor.toFixed(2)} < 1 — الاستراتيجية خاسرة على المدى البعيد. غيّر الإعدادات.` };
+    if (r.maxDrawdownPct > 20) return { level: "warn" as const, text: `أقصى تراجع ${r.maxDrawdownPct.toFixed(1)}% مرتفع — الاستراتيجية تحتاج تضييق ستوب أو تقليل حجم الصفقة.` };
+    if (r.profitFactor >= 1.5 && r.winRate >= 50) return { level: "ok" as const, text: `ممتاز — PF ${r.profitFactor.toFixed(2)} × WR ${r.winRate.toFixed(0)}% × MaxDD ${r.maxDrawdownPct.toFixed(1)}%. الاستراتيجية قوية تاريخياً.` };
+    return { level: "ok" as const, text: `الاستراتيجية مقبولة — PF ${r.profitFactor.toFixed(2)} × WR ${r.winRate.toFixed(0)}%. بإمكانك تحسينها بالتشخيص التلقائي.` };
+  }, [r]);
+
   const noData = !r;
 
   return (
@@ -263,13 +295,40 @@ function ComparePage() {
         </div>
 
         {noData && (
-          <EmptyState msg="لا توجد نتائج باك تيست محفوظة بعد. شغّل Backtest أولاً." />
+          <div className="rounded-2xl border border-dashed border-border p-10 text-center space-y-3">
+            <div className="text-sm text-muted-foreground">لا توجد نتائج باك تيست محفوظة بعد.</div>
+            <Link to="/backtest"
+              className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded text-sm font-semibold hover:opacity-90">
+              <Zap className="size-4" /> اذهب لتشغيل Backtest أولاً
+            </Link>
+          </div>
         )}
 
         {r && (
           <>
+            {/* Assessment banner */}
+            {assessment && (
+              <div className={cn(
+                "rounded-2xl border px-4 py-3 flex items-start gap-3",
+                assessment.level === "ok" ? "border-bull/40 bg-bull/5"
+                : assessment.level === "warn" ? "border-gold/40 bg-gold/5"
+                : "border-bear/40 bg-bear/5"
+              )}>
+                {assessment.level === "ok"
+                  ? <CheckCircle2 className="size-5 text-bull mt-0.5 shrink-0" />
+                  : assessment.level === "warn"
+                  ? <AlertTriangle className="size-5 text-gold mt-0.5 shrink-0" />
+                  : <XCircle className="size-5 text-bear mt-0.5 shrink-0" />
+                }
+                <div>
+                  <div className="text-[11px] text-muted-foreground uppercase tracking-wider mb-0.5">تقييم الاستراتيجية</div>
+                  <div className="text-sm font-medium">{assessment.text}</div>
+                </div>
+              </div>
+            )}
+
             {/* Context bar */}
-            <div className="rounded-2xl border border-border bg-card/40 p-3 text-[11px] mono text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+            <div className="rounded-2xl border border-border bg-card/40 p-3 text-[11px] mono text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 items-center">
               <span>الزوج: <span className="text-foreground font-semibold">{r.symbol}</span></span>
               <span>الفريم: <span className="text-foreground font-semibold">{r.interval}</span></span>
               <span>BT: {new Date(r.fromTime).toLocaleString("en-GB")} → {new Date(r.toTime).toLocaleString("en-GB")}</span>
@@ -278,13 +337,51 @@ function ComparePage() {
               <span>صفقات BT: <span className="text-foreground">{r.trades.length}</span></span>
             </div>
 
+            {/* Inject BT as Live — main CTA when no live signals */}
+            {liveSignals < 5 && r.trades.length > 0 && (
+              <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <RefreshCw className="size-5 text-primary mt-0.5 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-sm">الإشارات الحيّة فارغة أو غير كافية</div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5 leading-relaxed">
+                      الإشارات الحيّة تتراكم فقط عندما تكون اللوحة الرئيسية مفتوحة.
+                      لرؤية المقارنة <strong>فوراً</strong>، يمكنك حقن صفقات الباك تيست ({r.trades.length} صفقة)
+                      كإشارات حيّة اصطناعية — وستجد المقارنة الكاملة في الحال.
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={injectBTAsLive}
+                    disabled={injected}
+                    className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-all"
+                  >
+                    {injected ? <CheckCircle2 className="size-4" /> : <Zap className="size-4" />}
+                    {injected ? `تم الحقن (${r.trades.length} إشارة)` : `حقن ${r.trades.length} صفقة كإشارات حيّة`}
+                  </button>
+                  {injected && (
+                    <span className="text-[11px] text-bull flex items-center gap-1">
+                      <CheckCircle2 className="size-3.5" /> مكتمل — المقارنة أدناه تعكس الآن نتائج الباك تيست
+                    </span>
+                  )}
+                </div>
+                {!injected && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Clock className="size-3" />
+                    للمقارنة الحقيقية بين Live والباك تيست: افتح اللوحة الرئيسية وانتظر تراكم الإشارات الحيّة طبيعياً.
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Warning: low sample size */}
             {matched < 5 && liveSignals > 0 && (
               <div className="rounded-xl border border-gold/40 bg-gold/10 text-gold text-[12px] px-4 py-2.5 flex items-start gap-2">
                 <AlertTriangle className="size-4 shrink-0 mt-0.5" />
                 <span>
                   <strong>عينة صغيرة ({matched} إشارة مطابقة).</strong> النتائج الإحصائية غير موثوقة.
-                  دع اللوحة تعمل لفترة أطول لتراكم إشارات أكثر.
+                  دع اللوحة تعمل لفترة أطول، أو استخدم زر الحقن أعلاه.
                 </span>
               </div>
             )}

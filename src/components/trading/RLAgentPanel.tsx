@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import {
   Bot, Power, TrendingUp, TrendingDown, Minus,
   Activity, Database, Zap, RefreshCw, Brain, Target,
-  BarChart2,
+  BarChart2, ShieldCheck, AlertCircle, Loader2,
 } from "lucide-react";
 import { fmtPrice } from "@/lib/binance";
 
@@ -26,9 +26,9 @@ interface AgentDecision {
 interface PendingReward {
   state: number[];
   action: number;
-  entry: number;   // price when decision was made
+  entry: number;
   tick: number;
-  evalAtTick: number; // evaluate reward when tick reaches this
+  evalAtTick: number;
 }
 
 interface Experience {
@@ -36,6 +36,14 @@ interface Experience {
   action: number;
   reward: number;
   nextState: number[];
+}
+
+// Consensus: majority vote across last CONSENSUS_WINDOW decisions
+interface Consensus {
+  action: RLAction;
+  conviction: number;   // 0..1 — fraction of last N decisions agreeing
+  phase: "calibrating" | "converging" | "stable";
+  actionable: boolean;  // true only when conviction ≥ threshold AND phase = stable
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -47,10 +55,15 @@ const LR          = 0.004;
 const ENTROPY_C   = 0.08;
 const BATCH       = 24;
 const REPLAY_MAX  = 800;
-const REWARD_TICKS= 5;     // evaluate reward after 5 ticks (~10s)
+const REWARD_TICKS= 5;
 const INIT_EXPL   = 0.22;
 const MIN_EXPL    = 0.04;
-const EXPL_DECAY  = 0.9985; // slower decay → more exploration
+const EXPL_DECAY  = 0.9985;
+
+const CONSENSUS_WINDOW   = 7;   // majority vote over last 7 decisions
+const CONSENSUS_THRESH   = 0.65; // 5/7 agreement → actionable
+const CALIBRATING_TICKS  = 40;
+const CONVERGING_TICKS   = 120;
 
 // ── Math ───────────────────────────────────────────────────────────────────
 const relu = (x: number) => (x > 0 ? x : 0);
@@ -68,18 +81,12 @@ function softmax(a: number[]): number[] {
 // ── Weights ─────────────────────────────────────────────────────────────────
 interface W { W1:number[][];b1:number[];W2:number[][];b2:number[];W3:number[][];b3:number[] }
 
-// Xavier / Glorot uniform initialisation with tiny domain-knowledge bias
-// Features: [score, conf, imbal, wallPx, micro, mom, volDir, rsi,
-//            sprd,  wallImb, atrNorm, entropy, recentWR, momStr]
-//            [0]    [1]    [2]    [3]     [4]    [5]    [6]    [7]
-//            [8]    [9]    [10]   [11]    [12]   [13]
 function initWeights(): W {
-  const r1 = Math.sqrt(6 / (IN + H1));  // ≈ 0.361
-  const r2 = Math.sqrt(6 / (H1 + H2)); // ≈ 0.354
-  const r3 = Math.sqrt(6 / (H2 + OUT)); // ≈ 0.562
+  const r1 = Math.sqrt(6 / (IN + H1));
+  const r2 = Math.sqrt(6 / (H1 + H2));
+  const r3 = Math.sqrt(6 / (H2 + OUT));
   const rng = (r: number) => (Math.random() * 2 - 1) * r;
 
-  // Domain bias magnitudes (tiny — won't saturate softmax)
   const BULL: Record<number, number> = { 0:0.06, 2:0.05, 5:0.05, 9:0.04, 12:0.04, 13:0.04 };
   const BEAR: Record<number, number> = { 0:-0.06, 2:-0.05, 5:-0.05, 9:-0.04, 12:-0.04, 13:-0.04 };
   const HOLD: Record<number, number> = { 7:0.05, 8:0.06, 10:0.04, 11:0.06 };
@@ -96,9 +103,8 @@ function initWeights(): W {
 
   const W2 = Array.from({ length: H2 }, () => Array.from({ length: H1 }, () => rng(r2)));
   const b2 = Array(H2).fill(0);
-
   const W3 = Array.from({ length: OUT }, () => Array.from({ length: H2 }, () => rng(r3)));
-  const b3 = [0.0, 0.0, 0.15]; // slight initial HOLD preference
+  const b3 = [0.0, 0.0, 0.15];
 
   return { W1, b1, W2, b2, W3, b3 };
 }
@@ -115,16 +121,13 @@ function fwd(s: number[], w: W): FWD {
 }
 
 // ── REINFORCE update ────────────────────────────────────────────────────────
-// Advantage is batch-normalised (reward - mean) / std — stable regardless of
-// reward scale. Gradient clip widened to ±2.0 to allow faster learning.
 function update(w: W, batch: Experience[]): W {
   const nW1 = w.W1.map(r => [...r]), nb1 = [...w.b1];
   const nW2 = w.W2.map(r => [...r]), nb2 = [...w.b2];
   const nW3 = w.W3.map(r => [...r]), nb3 = [...w.b3];
-  const clipG = (v: number) => Math.max(-2.0, Math.min(2.0, v)); // gradient clip
-  const clipW = (v: number) => Math.max(-3.0, Math.min(3.0, v)); // weight clip
+  const clipG = (v: number) => Math.max(-2.0, Math.min(2.0, v));
+  const clipW = (v: number) => Math.max(-3.0, Math.min(3.0, v));
 
-  // Batch-normalise rewards → stable advantage regardless of scale
   const rewards = batch.map(e => e.reward);
   const meanR = rewards.reduce((s, r) => s + r, 0) / rewards.length;
   const varR  = rewards.reduce((s, r) => s + (r - meanR) ** 2, 0) / rewards.length;
@@ -134,7 +137,6 @@ function update(w: W, batch: Experience[]): W {
     const f = fwd(ex.state, w);
     const { h1, h1p, h2, h2p, probs } = f;
 
-    // Normalised advantage + entropy regularisation
     const adv = Math.max(-3, Math.min(3, (ex.reward - meanR) / stdR));
     const ent = -probs.reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0);
     const dLogits = probs.map((p, k) => {
@@ -170,12 +172,12 @@ function buildState(
   recentWR: number,
   lastProbs: ActionProbs | null
 ): number[] {
-  const ent    = lastProbs
+  const ent  = lastProbs
     ? -([lastProbs.long, lastProbs.short, lastProbs.hold].reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0))
     : Math.log(3);
-  const entN   = c01(ent / Math.log(3));
-  const atrPx  = c01(m.spreadPct / 0.05);
-  const sprd   = c01(m.spreadPct / 0.1);
+  const entN  = c01(ent / Math.log(3));
+  const atrPx = c01(m.spreadPct / 0.05);
+  const sprd  = c01(m.spreadPct / 0.1);
 
   if (v) {
     return [
@@ -213,7 +215,6 @@ function decide(probs: number[], eps: number): { action: RLAction; explored: boo
   let action: RLAction;
   let explored = false;
   if (Math.random() < eps) {
-    // Softmax sampling (not pure random — biased toward high-prob actions)
     const r = Math.random();
     action = r < pL ? "LONG" : r < pL + pS ? "SHORT" : "HOLD";
     explored = true;
@@ -224,12 +225,27 @@ function decide(probs: number[], eps: number): { action: RLAction; explored: boo
   return { action, explored };
 }
 
-// ── Confidence = action probability penalised by entropy ───────────────────
 function confidence(probs: number[], action: RLAction): number {
   const pA  = action === "LONG" ? probs[0] : action === "SHORT" ? probs[1] : probs[2];
   const ent = -probs.reduce((s, p) => s + (p > 1e-9 ? p * Math.log(p) : 0), 0);
-  const cer = 1 - ent / Math.log(3);  // 0 = max uncertainty, 1 = fully certain
+  const cer = 1 - ent / Math.log(3);
   return Math.round(c01(pA) * 100 * (0.5 + 0.5 * cer));
+}
+
+// ── Compute consensus from last N decisions ─────────────────────────────────
+function computeConsensus(log: AgentDecision[], tick: number): Consensus | null {
+  if (log.length < 3) return null;
+  const window = log.slice(0, CONSENSUS_WINDOW);
+  const counts: Record<RLAction, number> = { LONG: 0, SHORT: 0, HOLD: 0 };
+  window.forEach(d => counts[d.action]++);
+  const top = (Object.entries(counts) as [RLAction, number][])
+    .sort(([, a], [, b]) => b - a)[0];
+  const conviction = top[1] / window.length;
+  const phase: Consensus["phase"] =
+    tick < CALIBRATING_TICKS ? "calibrating" :
+    tick < CONVERGING_TICKS  ? "converging"  : "stable";
+  const actionable = phase === "stable" && conviction >= CONSENSUS_THRESH;
+  return { action: top[0], conviction, phase, actionable };
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -239,17 +255,17 @@ export function RLAgentPanel({
 
   const [active,     setActive]    = useState(false);
   const [thinking,   setThinking]  = useState(false);
-  const [current,    setCurrent]   = useState<AgentDecision | null>(null);
   const [log,        setLog]       = useState<AgentDecision[]>([]);
+  const [consensus,  setConsensus] = useState<Consensus | null>(null);
   const [dispExpl,   setDispExpl]  = useState(INIT_EXPL);
   const [dispStep,   setDispStep]  = useState(0);
   const [dispWR,     setDispWR]    = useState(0.5);
   const [dispTrades, setDispTrades]= useState(0);
 
-  // Mutable refs — no re-render cost
   const W        = useRef<W>(initWeights());
   const replay   = useRef<Experience[]>([]);
-  const pending  = useRef<PendingReward[]>([]);   // delayed reward queue
+  const pending  = useRef<PendingReward[]>([]);
+  const logRef   = useRef<AgentDecision[]>([]);
   const tickR    = useRef(0);
   const stepR    = useRef(0);
   const winsR    = useRef(0);
@@ -258,7 +274,6 @@ export function RLAgentPanel({
   const probsR   = useRef<ActionProbs | null>(null);
   const timer    = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Prop refs (avoid closure staleness)
   const vRef = useRef(verdict);
   const mRef = useRef(metrics);
   useEffect(() => { vRef.current = verdict; }, [verdict]);
@@ -274,26 +289,20 @@ export function RLAgentPanel({
       const tick = ++tickR.current;
       const wr   = tradesR.current > 0 ? winsR.current / tradesR.current : 0.5;
 
-      // ── 1. Process matured rewards (decisions made REWARD_TICKS ago) ──────
-      const matured = pending.current.filter(p => tick >= p.evalAtTick);
-      const remaining = pending.current.filter(p => tick < p.evalAtTick);
-      pending.current = remaining;
+      // ── 1. Process matured rewards ───────────────────────────────────────
+      const matured   = pending.current.filter(p => tick >= p.evalAtTick);
+      pending.current = pending.current.filter(p => tick < p.evalAtTick);
 
       for (const p of matured) {
         const priceDeltaPct = (m.mid - p.entry) / p.entry * 100;
-        // ATR-normalised reward via tanh → always in (-1, +1), scale-free.
-        // spreadPct is a volatility proxy: ATR ≈ 10–20× the bid-ask spread.
-        const volProxy = Math.max(m.spreadPct * 12, 0.003); // ~10–15× spread, min 0.003%
+        const volProxy = Math.max(m.spreadPct * 12, 0.003);
         const normalized = priceDeltaPct / volProxy;
         let reward = 0;
         if (p.action === 0) {
-          // LONG: positive when price rose (risk-adjusted)
           reward = Math.tanh(normalized);
         } else if (p.action === 1) {
-          // SHORT: positive when price fell (risk-adjusted)
           reward = Math.tanh(-normalized);
         } else {
-          // HOLD: slight positive in calm markets; penalises missing a clear move
           reward = Math.tanh(-Math.abs(normalized) * 0.6) + 0.12;
         }
 
@@ -304,15 +313,12 @@ export function RLAgentPanel({
         ].slice(0, REPLAY_MAX);
 
         if (replay.current.length >= BATCH) {
-          // Prioritised replay: sample high-|reward| experiences more often.
-          // Top 60% drawn from highest-|reward| pool; remaining 40% random.
           const sorted = [...replay.current]
             .sort((a, b) => Math.abs(b.reward) - Math.abs(a.reward));
           const splitAt = Math.floor(sorted.length * 0.6);
           const hi = sorted.slice(0, splitAt).sort(() => Math.random() - 0.5);
           const lo = sorted.slice(splitAt).sort(() => Math.random() - 0.5);
-          const batchSamples = [...hi, ...lo].slice(0, BATCH);
-          W.current = update(W.current, batchSamples);
+          W.current = update(W.current, [...hi, ...lo].slice(0, BATCH));
           stepR.current++;
 
           if (reward > 0) winsR.current++;
@@ -335,7 +341,6 @@ export function RLAgentPanel({
       const { action, explored } = decide(result.probs, explR.current);
       const conf = confidence(result.probs, action);
 
-      // Queue this decision for delayed reward evaluation
       pending.current.push({
         state, action: action === "LONG" ? 0 : action === "SHORT" ? 1 : 2,
         entry: m.mid, tick, evalAtTick: tick + REWARD_TICKS,
@@ -350,13 +355,18 @@ export function RLAgentPanel({
         tick,
         explored,
       };
-      setCurrent(dec);
-      setLog(prev => [dec, ...prev].slice(0, 15));
+
+      // Update log ref (mutable, no re-render cost)
+      logRef.current = [dec, ...logRef.current].slice(0, 15);
+
+      // Compute consensus and update state
+      const newConsensus = computeConsensus(logRef.current, tick);
+      setConsensus(newConsensus);
+      setLog([...logRef.current]);
       setThinking(false);
     }, 40);
-  }, []); // ← always stable
+  }, []);
 
-  // Start / stop interval
   useEffect(() => {
     if (!active) {
       if (timer.current) { clearInterval(timer.current); timer.current = null; }
@@ -367,12 +377,13 @@ export function RLAgentPanel({
     return () => { if (timer.current) clearInterval(timer.current); };
   }, [active, evaluate]);
 
-  // Reset on deactivate
   useEffect(() => {
     if (!active) {
-      setCurrent(null); setLog([]);
+      setLog([]);
+      setConsensus(null);
       W.current      = initWeights();
       replay.current = []; pending.current = [];
+      logRef.current = [];
       tickR.current  = 0; stepR.current = 0;
       winsR.current  = 0; tradesR.current = 0;
       explR.current  = INIT_EXPL;
@@ -386,12 +397,13 @@ export function RLAgentPanel({
     : null;
 
   const fNames = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr"];
+  const current = log[0] ?? null;
 
   return (
     <div className={cn(
       "rounded-2xl border overflow-hidden transition-all duration-300",
       active
-        ? "border-primary/50 bg-card/70 shadow-[0_0_24px_rgba(var(--primary-rgb,99,102,241),.15)]"
+        ? "border-primary/50 bg-card/70 shadow-[0_0_24px_rgba(99,102,241,.15)]"
         : "border-border bg-card/60"
     )}>
       {/* Header */}
@@ -422,8 +434,8 @@ export function RLAgentPanel({
               {active
                 ? thinking
                   ? "جاري التحليل..."
-                  : `تيكر #${tickR.current} · خطوات: ${dispStep} · ε=${(dispExpl*100).toFixed(0)}% · أفق: ${REWARD_TICKS} تيكرات`
-                : "REINFORCE · مكافأة مُعيَّرة-ATR · إعادة تجربة ذات أولوية · بيس لاين دُفعي"
+                  : `تيكر #${tickR.current} · خطوات: ${dispStep} · ε=${(dispExpl*100).toFixed(0)}% · توافق آخر ${CONSENSUS_WINDOW}`
+                : "REINFORCE · مكافأة معيَّرة-ATR · إعادة تجربة ذات أولوية · توافق إجماعي"
               }
             </div>
           </div>
@@ -433,7 +445,7 @@ export function RLAgentPanel({
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-[12px] font-bold border transition-all",
             active
-              ? "bg-primary text-primary-foreground border-primary shadow-[0_0_12px_rgba(var(--primary-rgb,99,102,241),.4)] hover:opacity-90"
+              ? "bg-primary text-primary-foreground border-primary shadow-[0_0_12px_rgba(99,102,241,.4)] hover:opacity-90"
               : "bg-card border-border text-foreground hover:border-primary hover:text-primary"
           )}
         >
@@ -452,14 +464,23 @@ export function RLAgentPanel({
 
         {active && metrics && (
           <>
-            <div className="grid grid-cols-3 gap-3">
-              <DecisionCard action={current?.action ?? null} thinking={thinking} explored={current?.explored} />
-              <ConfCard     confidence={current?.confidence ?? null} thinking={thinking} />
-              <ScoreCard    score={current?.score ?? null} thinking={thinking} />
-            </div>
+            {/* ── Consensus signal (PRIMARY display) ──────────────────── */}
+            <ConsensusCard consensus={consensus} thinking={thinking} tick={tickR.current} />
 
+            {/* ── Per-action probabilities ──────────────────────────── */}
             {current && <ProbBars probs={current.probs} thinking={thinking} />}
 
+            {/* ── Phase explanation ─────────────────────────────────── */}
+            {consensus && consensus.phase !== "stable" && (
+              <div className="rounded-xl border border-gold/30 bg-gold/5 px-3 py-2 text-[11px] text-gold flex items-center gap-2">
+                <Loader2 className="size-3.5 animate-spin" />
+                {consensus.phase === "calibrating"
+                  ? `مرحلة المعايرة — الوكيل يستكشف السوق (${tickR.current}/${CALIBRATING_TICKS} تيكر). الإشارات غير مستقرة بعد.`
+                  : `مرحلة التقارب — الوكيل يبدأ بالاستقرار (${tickR.current}/${CONVERGING_TICKS} تيكر). المزيد من البيانات تحسّن الدقة.`}
+              </div>
+            )}
+
+            {/* ── Learning stats ──────────────────────────────────── */}
             {dispTrades >= 3 && (
               <div className="rounded-xl border border-border bg-secondary/20 p-3 grid grid-cols-4 gap-2 text-center">
                 <MiniStat label="الصفقات"    value={String(dispTrades)} />
@@ -473,6 +494,7 @@ export function RLAgentPanel({
               </div>
             )}
 
+            {/* ── State vector ─────────────────────────────────────── */}
             {stateVec && (
               <div className="rounded-xl border border-border bg-secondary/20 p-3 space-y-2">
                 <div className="flex items-center justify-between">
@@ -498,14 +520,16 @@ export function RLAgentPanel({
               </div>
             )}
 
+            {/* ── Decision log (sequential ticks, not simultaneous) ── */}
             {log.length > 0 && (
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                  <Activity className="size-3 text-primary" /> سجل القرارات
+                  <Activity className="size-3 text-primary" />
+                  سجل القرارات المتتالية — كل سطر = تيكر مستقل (2 ثانية)
                 </div>
                 <div className="space-y-1 max-h-48 overflow-y-auto rounded-xl border border-border bg-secondary/10 p-2">
                   {log.map(d => (
-                    <LogRow key={`${d.tick}-${d.timestamp}`} d={d} isLatest={d.tick===current?.tick} />
+                    <LogRow key={`${d.tick}-${d.timestamp}`} d={d} isLatest={d.tick === log[0]?.tick} />
                   ))}
                 </div>
               </div>
@@ -520,18 +544,109 @@ export function RLAgentPanel({
             </div>
             <div>
               <div className="text-sm font-semibold">اضغط "تفعيل الوكيل" للبدء</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5 max-w-xs mx-auto">
-                وكيل تعزيزي حقيقي — مكافأة معيَّرة-ATR، استكشاف ديناميكي، إعادة تجربة ذات أولوية
+              <div className="text-[11px] text-muted-foreground mt-0.5 max-w-sm mx-auto">
+                يعمل بقرارات مستقلة كل 2 ثانية. الإشارة الموثوقة تظهر بعد ~{CONVERGING_TICKS} تيكر (≈4 دقائق) حين يبلغ الوكيل التقارب.
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
               <Arch icon={<Brain className="size-3" />}    label="14 مدخل" />
               <Arch icon={<BarChart2 className="size-3" />} label="32-16-3" />
-              <Arch icon={<Target className="size-3" />}   label="REINFORCE" />
+              <Arch icon={<Target className="size-3" />}   label="إجماع 7 تيكرات" />
             </div>
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Consensus Card (replaces single-tick DecisionCard) ──────────────────────
+function ConsensusCard({ consensus, thinking, tick }: {
+  consensus: Consensus | null;
+  thinking: boolean;
+  tick: number;
+}) {
+  if (thinking && !consensus) return (
+    <div className="rounded-xl border border-border bg-secondary/20 p-4 flex items-center justify-center gap-2 text-muted-foreground text-sm">
+      <Loader2 className="size-4 animate-spin" /> جاري التحليل...
+    </div>
+  );
+
+  if (!consensus || tick < 3) return (
+    <div className="rounded-xl border border-border bg-secondary/20 p-4 text-center text-[12px] text-muted-foreground">
+      جاري جمع البيانات... ({tick}/3 تيكرات)
+    </div>
+  );
+
+  const { action, conviction, phase, actionable } = consensus;
+  const convPct = Math.round(conviction * 100);
+
+  const actionColor =
+    action === "LONG"  ? "text-bull"  :
+    action === "SHORT" ? "text-bear"  : "text-muted-foreground";
+  const actionBg =
+    action === "LONG"  ? "bg-bull/10 border-bull/30"  :
+    action === "SHORT" ? "bg-bear/10 border-bear/30"  : "bg-secondary/20 border-border";
+  const ActionIcon =
+    action === "LONG"  ? TrendingUp   :
+    action === "SHORT" ? TrendingDown : Minus;
+
+  return (
+    <div className={cn("rounded-xl border p-4 space-y-3", actionBg)}>
+      {/* Label */}
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+          <ShieldCheck className="size-3" />
+          إجماع الوكيل (آخر {Math.min(tick, CONSENSUS_WINDOW)} تيكرات)
+        </div>
+        <span className={cn(
+          "text-[9px] mono px-2 py-0.5 rounded-full border font-semibold",
+          phase === "calibrating" ? "text-gold border-gold/30 bg-gold/10"
+          : phase === "converging" ? "text-primary border-primary/30 bg-primary/10"
+          : actionable ? "text-bull border-bull/30 bg-bull/10" : "text-muted-foreground border-border"
+        )}>
+          {phase === "calibrating" ? "معايرة" : phase === "converging" ? "تقارب" : actionable ? "✓ قابل للتنفيذ" : "غير كافٍ"}
+        </span>
+      </div>
+
+      {/* Main signal */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={cn("size-12 rounded-xl border flex items-center justify-center", actionBg)}>
+            <ActionIcon className={cn("size-6", actionColor)} />
+          </div>
+          <div>
+            <div className={cn("text-2xl font-black mono", actionColor)}>
+              {action === "LONG" ? "شراء" : action === "SHORT" ? "بيع" : "انتظار"}
+            </div>
+            <div className="text-[10px] text-muted-foreground">{action}</div>
+          </div>
+        </div>
+
+        {/* Conviction bar */}
+        <div className="text-right space-y-1">
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wider">الاقتناع</div>
+          <div className={cn("text-2xl font-black mono",
+            convPct >= 70 ? "text-bull" : convPct >= 50 ? "text-gold" : "text-bear"
+          )}>{convPct}%</div>
+          <div className="w-24 h-1.5 rounded-full bg-secondary overflow-hidden">
+            <div
+              className={cn("h-full rounded-full transition-all",
+                convPct >= 70 ? "bg-bull" : convPct >= 50 ? "bg-gold" : "bg-bear"
+              )}
+              style={{ width: `${convPct}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Warning when not actionable */}
+      {!actionable && phase === "stable" && (
+        <div className="flex items-center gap-1.5 text-[10px] text-gold">
+          <AlertCircle className="size-3" />
+          الاقتناع {convPct}% &lt; {Math.round(CONSENSUS_THRESH*100)}% — إشارة مترددة، لا تتصرف الآن
+        </div>
+      )}
     </div>
   );
 }
@@ -554,133 +669,77 @@ function MiniStat({ label, value, color }: { label: string; value: string; color
   );
 }
 
-function DecisionCard({ action, thinking, explored }: { action: RLAction | null; thinking: boolean; explored?: boolean }) {
-  const cfg = {
-    LONG:  { color:"text-bull", bg:"bg-bull/8 border-bull/30",  Icon:TrendingUp,   ar:"شراء LONG"  },
-    SHORT: { color:"text-bear", bg:"bg-bear/8 border-bear/30",  Icon:TrendingDown, ar:"بيع SHORT"  },
-    HOLD:  { color:"text-gold", bg:"bg-gold/8 border-gold/30",  Icon:Minus,        ar:"انتظار HOLD"},
-  };
-  const c = action ? cfg[action] : null;
-  return (
-    <div className={cn(
-      "rounded-xl border p-3 transition-all relative",
-      thinking ? "animate-pulse bg-secondary/30 border-border" : c ? c.bg : "bg-card/40 border-border"
-    )}>
-      {explored && !thinking && <span className="absolute top-1 left-1 text-[8px] mono text-primary opacity-60">ε</span>}
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">القرار</div>
-      {c && !thinking ? (
-        <>
-          <div className={cn("flex items-center gap-1.5 mt-1", c.color)}>
-            <c.Icon className="size-4" />
-            <span className="mono font-black text-lg">{action}</span>
-          </div>
-          <div className="text-[10px] text-muted-foreground mt-0.5">{c.ar}</div>
-        </>
-      ) : (
-        <div className="h-8 mt-1 bg-secondary/50 rounded animate-pulse" />
-      )}
-    </div>
-  );
-}
-
-function ConfCard({ confidence, thinking }: { confidence: number | null; thinking: boolean }) {
-  const color = confidence === null ? "text-muted-foreground"
-    : confidence >= 65 ? "text-bull" : confidence >= 45 ? "text-gold" : "text-bear";
-  return (
-    <div className="rounded-xl border border-border bg-card/40 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">ثقة الوكيل</div>
-      {!thinking && confidence !== null ? (
-        <>
-          <div className={cn("mono font-black text-lg mt-1", color)}>{confidence}%</div>
-          <div className="mt-1.5 h-1.5 rounded-full bg-secondary overflow-hidden">
-            <div
-              className={cn("h-full rounded-full transition-all duration-500",
-                confidence>=65?"bg-bull":confidence>=45?"bg-gold":"bg-bear")}
-              style={{ width:`${confidence}%` }}
-            />
-          </div>
-        </>
-      ) : (
-        <div className="h-8 mt-1 bg-secondary/50 rounded animate-pulse" />
-      )}
-    </div>
-  );
-}
-
-function ScoreCard({ score, thinking }: { score: number | null; thinking: boolean }) {
-  const color = score===null?"text-muted-foreground"
-    : score>=15?"text-bull":score<=-15?"text-bear":"text-gold";
-  return (
-    <div className="rounded-xl border border-border bg-card/40 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">درجة المؤسسي</div>
-      {!thinking && score !== null ? (
-        <>
-          <div className={cn("mono font-black text-lg mt-1", color)}>
-            {score>=0?"+":""}{score.toFixed(1)}
-          </div>
-          <div className="text-[10px] text-muted-foreground mt-0.5">[-100 → +100]</div>
-        </>
-      ) : (
-        <div className="h-8 mt-1 bg-secondary/50 rounded animate-pulse" />
-      )}
-    </div>
-  );
-}
-
 function ProbBars({ probs, thinking }: { probs: ActionProbs; thinking: boolean }) {
-  const bars = [
-    { label:"LONG",  v:probs.long,  color:"bg-bull" },
-    { label:"HOLD",  v:probs.hold,  color:"bg-gold" },
-    { label:"SHORT", v:probs.short, color:"bg-bear" },
+  const bars: { label: string; key: keyof ActionProbs; color: string }[] = [
+    { label: "LONG",  key: "long",  color: "bg-bull"  },
+    { label: "HOLD",  key: "hold",  color: "bg-muted-foreground" },
+    { label: "SHORT", key: "short", color: "bg-bear"  },
   ];
   return (
     <div className="rounded-xl border border-border bg-secondary/20 p-3 space-y-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">توزيع الاحتمالات</div>
-      {bars.map(({ label, v, color }) => (
-        <div key={label} className="flex items-center gap-2">
-          <span className="mono text-[10px] text-muted-foreground w-10 text-left">{label}</span>
-          <div className="flex-1 h-3 rounded-full bg-secondary overflow-hidden">
-            <div
-              className={cn("h-full rounded-full transition-all duration-700", color, thinking&&"opacity-40")}
-              style={{ width:`${(v*100).toFixed(1)}%` }}
-            />
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+        <BarChart2 className="size-3 text-primary" /> احتمالية كل إجراء (آخر تيكر)
+      </div>
+      {bars.map(({ label, key, color }) => {
+        const pct = Math.round(probs[key] * 100);
+        return (
+          <div key={key} className="flex items-center gap-2">
+            <div className="text-[10px] mono w-10 text-muted-foreground">{label}</div>
+            <div className="flex-1 h-2 rounded-full bg-secondary overflow-hidden">
+              <div
+                className={cn("h-full rounded-full transition-all", color, thinking ? "opacity-40" : "")}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <div className="text-[10px] mono w-8 text-right text-muted-foreground">{pct}%</div>
           </div>
-          <span className="mono text-[10px] text-muted-foreground w-8 text-left">
-            {(v*100).toFixed(0)}%
-          </span>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 function FeatCell({ name, value }: { name: string; value: number }) {
-  const color = value>0.05?"text-bull":value<-0.05?"text-bear":"text-muted-foreground";
+  const abs = Math.abs(value);
+  const bg =
+    abs < 0.15 ? "bg-secondary/30" :
+    value > 0  ? "bg-bull/20 border-bull/20" :
+                 "bg-bear/20 border-bear/20";
   return (
-    <div className="rounded-lg border border-border bg-card/40 px-1.5 py-1 text-center">
-      <div className="text-[8px] text-muted-foreground uppercase tracking-wider truncate">{name}</div>
-      <div className={cn("mono text-[10px] font-bold mt-0.5", color)}>
-        {value>=0?"+":""}{value.toFixed(2)}
+    <div className={cn("rounded p-1 text-center border border-transparent text-[8px]", bg)}>
+      <div className="text-muted-foreground leading-tight">{name}</div>
+      <div className={cn("mono font-bold leading-tight", value > 0.1 ? "text-bull" : value < -0.1 ? "text-bear" : "text-foreground")}>
+        {value >= 0 ? "+" : ""}{value.toFixed(2)}
       </div>
     </div>
   );
 }
 
 function LogRow({ d, isLatest }: { d: AgentDecision; isLatest: boolean }) {
-  const time  = new Date(d.timestamp).toLocaleTimeString("ar", { hour:"2-digit", minute:"2-digit", second:"2-digit" });
-  const color = { LONG:"text-bull", SHORT:"text-bear", HOLD:"text-gold" }[d.action];
-  const bg    = { LONG:"bg-bull/5 border-bull/20", SHORT:"bg-bear/5 border-bear/20", HOLD:"bg-secondary/20 border-border/50" }[d.action];
+  const col =
+    d.action === "LONG"  ? "text-bull"  :
+    d.action === "SHORT" ? "text-bear"  : "text-muted-foreground";
+  const Icon =
+    d.action === "LONG"  ? TrendingUp   :
+    d.action === "SHORT" ? TrendingDown : Minus;
+  const now = Date.now();
+  const secAgo = Math.round((now - d.timestamp) / 1000);
+
   return (
     <div className={cn(
-      "flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[11px] mono border",
-      isLatest ? "ring-1 ring-primary/30 "+bg : bg
+      "flex items-center gap-2 px-2 py-1 rounded text-[10px] mono transition-colors",
+      isLatest ? "bg-primary/10 border border-primary/20" : d.explored ? "opacity-40" : "opacity-70",
     )}>
-      <span className="text-muted-foreground w-16">{time}</span>
-      <span className={cn("font-black w-12 text-center", color)}>{d.action}</span>
-      <span className="text-muted-foreground w-14 text-center">{d.confidence}%</span>
-      <span className="text-muted-foreground">{fmtPrice(d.entry)}</span>
-      {d.explored && <span className="text-[8px] text-primary w-3">ε</span>}
-      <span className="text-muted-foreground text-[9px] w-10 text-left">#{d.tick}</span>
+      <span className="text-muted-foreground w-6 text-right">{d.tick}</span>
+      <Icon className={cn("size-3 flex-shrink-0", col)} />
+      <span className={cn("font-bold w-10", col)}>{d.action}</span>
+      <span className="text-muted-foreground flex-1">
+        conf {d.confidence}% · L{(d.probs.long*100).toFixed(0)} S{(d.probs.short*100).toFixed(0)} H{(d.probs.hold*100).toFixed(0)}
+      </span>
+      <span className="text-muted-foreground/60">
+        {isLatest ? "الآن" : `${secAgo}s`}
+        {d.explored && <span className="text-gold/60 mr-1">ε</span>}
+      </span>
     </div>
   );
 }

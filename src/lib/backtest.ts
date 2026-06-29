@@ -571,6 +571,139 @@ export function runBacktest(
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+//  AUTO-CALIBRATION  —  ضبط تلقائي للإعدادات من البيانات الحية
+//  Detects market regime and recommends optimal BacktestParams.
+// ════════════════════════════════════════════════════════════════════════
+
+export type MarketRegime = "trending" | "ranging" | "volatile";
+
+export interface AutoCalibResult {
+  preset: MarketPreset;
+  params: BacktestParams;
+  regime: MarketRegime;
+  reasoning: string[];
+  atrPct: number;
+  adxProxy: number;
+  trendScore: number;
+  emaDirection: "up" | "down" | "sideways";
+  confidence: number; // 0-100 — how clear the regime signal is
+}
+
+/** Compute EMA over last n klines using closing prices */
+function emaLast(klines: Kline[], period: number): number {
+  const closes = klines.slice(-period * 3).map(k => k.close);
+  const k = 2 / (period + 1);
+  let ema = closes[0];
+  for (let i = 1; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+/**
+ * Detects current market regime from klines and returns the optimal
+ * BacktestParams preset + reasoning in Arabic.
+ */
+export function autoCalibrate(klines: Kline[], base: BacktestParams): AutoCalibResult {
+  const n = klines.length;
+  if (n < 80) {
+    return {
+      preset: base.preset === "custom" ? "trending" : base.preset,
+      params: base,
+      regime: "trending",
+      reasoning: ["بيانات غير كافية للتشخيص التلقائي (< 80 شمعة)"],
+      atrPct: 0, adxProxy: 0, trendScore: 0,
+      emaDirection: "sideways", confidence: 0,
+    };
+  }
+
+  const closes = klines.map(k => k.close);
+  const price = closes[n - 1];
+
+  // ── ATR% (volatility) ────────────────────────────────────────────────
+  let atrSum = 0;
+  const atrN = Math.min(14, n - 1);
+  for (let i = n - atrN; i < n; i++) {
+    const k = klines[i];
+    const prev = klines[i - 1];
+    const tr = Math.max(k.high - k.low, Math.abs(k.high - prev.close), Math.abs(k.low - prev.close));
+    atrSum += tr;
+  }
+  const atr14 = atrSum / atrN;
+  const atrPct = (atr14 / price) * 100;
+
+  // ── EMA alignment (trend direction / slope) ─────────────────────────
+  const ema20  = emaLast(klines, 20);
+  const ema50  = emaLast(klines, 50);
+  const ema100 = emaLast(klines, 100);
+
+  const isUptrend   = price > ema20 && ema20 > ema50 && ema50 > ema100;
+  const isDowntrend = price < ema20 && ema20 < ema50 && ema50 < ema100;
+  const trendScore  = Math.abs(ema20 - ema50) / (ema50 || 1) * 100; // % separation
+
+  const emaDirection: AutoCalibResult["emaDirection"] =
+    isUptrend ? "up" : isDowntrend ? "down" : "sideways";
+
+  // ── ADX proxy: directional close-to-close vs total bar range ────────
+  const last25 = klines.slice(-25);
+  const dirMoves   = last25.reduce((s, k, i) => {
+    if (i === 0) return s;
+    return s + Math.abs(k.close - last25[i - 1].close);
+  }, 0);
+  const totalRange = last25.reduce((s, k) => s + (k.high - k.low || 0.001), 0);
+  const adxProxy   = totalRange > 0 ? dirMoves / totalRange : 0; // 0..1
+
+  // ── BB width proxy (squeeze detection) ──────────────────────────────
+  const last20closes = closes.slice(-20);
+  const meanC = last20closes.reduce((s, v) => s + v, 0) / 20;
+  const stdC  = Math.sqrt(last20closes.reduce((s, v) => s + (v - meanC) ** 2, 0) / 20);
+  const bbWidthPct = (stdC / meanC) * 100;
+
+  // ── Regime classification ────────────────────────────────────────────
+  let regime: MarketRegime;
+  let confidence: number;
+
+  if (atrPct > 2.8) {
+    regime = "volatile";
+    confidence = Math.min(100, Math.round((atrPct - 2.8) * 30 + 60));
+  } else if (adxProxy > 0.62 || trendScore > 0.35) {
+    regime = "trending";
+    confidence = Math.min(100, Math.round(
+      (adxProxy > 0.62 ? (adxProxy - 0.62) * 150 : 0) +
+      (trendScore > 0.35 ? trendScore * 40 : 0) + 50
+    ));
+  } else if (atrPct < 1.0 && bbWidthPct < 1.5) {
+    regime = "ranging";
+    confidence = Math.min(100, Math.round(70 + (1.5 - bbWidthPct) * 20));
+  } else {
+    regime = "ranging";
+    confidence = 45;
+  }
+
+  const preset: MarketPreset = regime;
+  const params = applyPreset(base, preset);
+
+  // ── Arabic reasoning bullets ────────────────────────────────────────
+  const reasoning: string[] = [
+    `📊 ATR%(14) = ${atrPct.toFixed(2)}% → ${atrPct > 2.8 ? "تقلب شديد" : atrPct > 1.5 ? "تقلب متوسط" : "تقلب منخفض هادئ"}`,
+    `📈 ADX proxy = ${(adxProxy * 100).toFixed(0)}% → ${adxProxy > 0.62 ? "اتجاه قوي" : adxProxy > 0.50 ? "اتجاه معتدل" : "حركة جانبية"}`,
+    `🎯 EMA20 vs EMA50 = ${trendScore.toFixed(3)}% → ${
+      emaDirection === "up"   ? "ترتيب صاعد (سعر > EMA20 > EMA50 > EMA100)" :
+      emaDirection === "down" ? "ترتيب هابط (سعر < EMA20 < EMA50 < EMA100)" :
+                                 "تقاطع، لا ترتيب واضح"
+    }`,
+    `📏 عرض بولنجر = ${bbWidthPct.toFixed(2)}% → ${bbWidthPct < 1.5 ? "ضيق (تراكم)" : bbWidthPct > 3 ? "واسع (تقلب)" : "طبيعي"}`,
+    `✅ النظام المكتشف: ${
+      regime === "trending" ? "اتجاهي — يُوصى بـ TP/SL واسع ومتابعة الترند" :
+      regime === "ranging"  ? "متذبذب — يُوصى بـ TP/SL ضيق وأخذ الأرباح السريعة" :
+                               "متقلب — يُوصى بـ minScore مرتفع والحذر الشديد"
+    } (ثقة ${confidence}%)`,
+  ];
+
+  return { preset, params, regime, reasoning, atrPct, adxProxy, trendScore, emaDirection, confidence };
+}
+
 export function backtestToCSV(r: BacktestResult): string {
   const lines: string[] = [];
   lines.push(`# WhaleEye Institutional Backtest v2`);

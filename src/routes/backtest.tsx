@@ -2,13 +2,14 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { SYMBOLS, TIMEFRAMES, type Interval, fetchKlines, fmtPrice } from "@/lib/binance";
 import {
-  runBacktest, DEFAULT_BT_PARAMS, backtestToCSV, applyPreset,
-  type BacktestParams, type BacktestResult, type MarketPreset,
+  runBacktest, DEFAULT_BT_PARAMS, backtestToCSV, applyPreset, autoCalibrate,
+  type BacktestParams, type BacktestResult, type MarketPreset, type AutoCalibResult,
 } from "@/lib/backtest";
 import { useSession } from "@/lib/session-store";
 import {
   ArrowLeft, Play, Loader2, TrendingUp, TrendingDown,
-  Download, FileText, Info, BookOpen,
+  Download, FileText, Info, BookOpen, Wand2, CheckCircle2,
+  TrendingUp as TrendUp, TrendingDown as TrendDn, Minus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +24,8 @@ function BacktestPage() {
   const [limit, setLimit] = useState<number>(500);
   const [params, setParams] = useState<BacktestParams>({ ...DEFAULT_BT_PARAMS });
   const [running, setRunning] = useState(false);
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibResult, setCalibResult] = useState<AutoCalibResult | null>(null);
   const [error, setError] = useState<string>("");
   const [showGuide, setShowGuide] = useState(true);
 
@@ -47,6 +50,23 @@ function BacktestPage() {
   };
 
   const applyP = (p: MarketPreset) => setParams((cur) => applyPreset(cur, p));
+
+  const runCalibrate = async () => {
+    setCalibrating(true);
+    setError("");
+    setCalibResult(null);
+    try {
+      const k = await fetchKlines(symbol, interval, Math.min(600, Math.max(120, limit)));
+      if (k.length < 80) throw new Error("بيانات غير كافية للتشخيص (< 80 شمعة)");
+      const cr = autoCalibrate(k, params);
+      setCalibResult(cr);
+      setParams(cr.params);
+    } catch (e: any) {
+      setError(e?.message ?? "خطأ في التشخيص التلقائي");
+    } finally {
+      setCalibrating(false);
+    }
+  };
 
   return (
     <div dir="rtl" className="min-h-screen bg-background text-foreground">
@@ -143,15 +163,73 @@ function BacktestPage() {
               <Info className="size-3" />
               يستخدم: المناطق السائلة + الزخم + RSI + ATR للستوب/الهدف. النتيجة الجديدة تُحفظ، والقديمة تُحفظ كـ«جولة سابقة» للمقارنة.
             </div>
-            <button onClick={run} disabled={running}
-              className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50">
-              {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {running ? "جارٍ التشغيل…" : "تشغيل Backtest"}
-            </button>
+            <div className="flex gap-2">
+              <button onClick={runCalibrate} disabled={running || calibrating}
+                className="inline-flex items-center gap-2 bg-gold/10 text-gold border border-gold/40 px-4 py-2 rounded text-sm font-semibold hover:bg-gold/20 disabled:opacity-50 transition-colors">
+                {calibrating ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+                {calibrating ? "جاري التشخيص…" : "تشخيص تلقائي"}
+              </button>
+              <button onClick={run} disabled={running || calibrating}
+                className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-4 py-2 rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50">
+                {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
+                {running ? "جارٍ التشغيل…" : "تشغيل Backtest"}
+              </button>
+            </div>
           </div>
         </div>
 
         {error && <div className="rounded-xl border border-bear/40 bg-bear/10 text-bear p-3 text-sm">{error}</div>}
+
+        {/* Auto-calibration results */}
+        {calibResult && (
+          <div className={cn(
+            "rounded-2xl border p-4 space-y-3",
+            calibResult.regime === "volatile" ? "border-bear/40 bg-bear/5"
+            : calibResult.regime === "trending" ? "border-bull/40 bg-bull/5"
+            : "border-gold/40 bg-gold/5"
+          )}>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Wand2 className={cn("size-5",
+                  calibResult.regime === "volatile" ? "text-bear"
+                  : calibResult.regime === "trending" ? "text-bull" : "text-gold"
+                )} />
+                <span className="font-bold text-sm">
+                  نتيجة التشخيص التلقائي — تم ضبط الإعدادات تلقائياً
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={cn("text-[11px] font-bold px-2.5 py-1 rounded-full border",
+                  calibResult.regime === "volatile" ? "text-bear border-bear/40 bg-bear/10"
+                  : calibResult.regime === "trending" ? "text-bull border-bull/40 bg-bull/10"
+                  : "text-gold border-gold/40 bg-gold/10"
+                )}>
+                  {calibResult.regime === "volatile" ? "متقلب" : calibResult.regime === "trending" ? "اتجاهي" : "متذبذب"}
+                </span>
+                <span className="text-[11px] text-muted-foreground mono">
+                  ثقة {calibResult.confidence}%
+                </span>
+                <div className="flex items-center gap-1 text-[11px]">
+                  {calibResult.emaDirection === "up" ? <TrendUp className="size-3.5 text-bull" />
+                    : calibResult.emaDirection === "down" ? <TrendDn className="size-3.5 text-bear" />
+                    : <Minus className="size-3.5 text-muted-foreground" />}
+                  <span className="text-muted-foreground">
+                    {calibResult.emaDirection === "up" ? "صاعد" : calibResult.emaDirection === "down" ? "هابط" : "جانبي"}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="grid md:grid-cols-2 gap-1.5">
+              {calibResult.reasoning.map((line, i) => (
+                <div key={i} className="text-[12px] text-foreground/80 leading-relaxed">{line}</div>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5 text-[11px] text-bull">
+              <CheckCircle2 className="size-3.5" />
+              تم تطبيق الإعدادات المثلى للنظام المكتشف — اضغط "تشغيل Backtest" لاختبارها
+            </div>
+          </div>
+        )}
 
         {result && <ResultView r={result} prev={prev} />}
 

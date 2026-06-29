@@ -13,6 +13,8 @@ import {
 import { useLiveDepth, useLiveTicker } from "@/hooks/useBinance";
 import { useCVD } from "@/hooks/useCVD";
 import { CVDPanel } from "@/components/trading/CVDPanel";
+import { useOFI } from "@/hooks/useOFI";
+import { OFIHeatmap } from "@/components/trading/OFIHeatmap";
 import {
   computeBookMetrics,
   computePriceMetrics,
@@ -187,6 +189,7 @@ function SymbolView({
     ? ((book.bids[0]?.price ?? 0) + (book.asks[0]?.price ?? 0)) / 2
     : 0;
   const cvdStats = useCVD(book, rawMid);
+  const ofiStats = useOFI(book, rawMid);
 
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
@@ -486,6 +489,31 @@ function SymbolView({
             }
           >
             <CVDPanel cvdStats={cvdStats} mid={rawMid} />
+          </Panel>
+
+          {/* OFI — Order Flow Imbalance Heatmap */}
+          <Panel
+            icon={<GitCompare className="size-4 text-primary" />}
+            title="OFI — خريطة حرارة تدفق الأوامر"
+            extra={
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  "text-[10px] mono px-2 py-0.5 rounded-full border",
+                  ofiStats.pressure === "buy"  ? "border-bull/40 text-bull bg-bull/10"
+                  : ofiStats.pressure === "sell" ? "border-bear/40 text-bear bg-bear/10"
+                  : "border-border text-muted-foreground"
+                )}>
+                  {ofiStats.pressure === "buy" ? "↑ ضغط شراء"
+                   : ofiStats.pressure === "sell" ? "↓ ضغط بيع"
+                   : "محايد"}
+                </span>
+                <span className="text-[10px] mono text-muted-foreground">
+                  {ofiStats.history.length} تيكر
+                </span>
+              </div>
+            }
+          >
+            <OFIHeatmap ofi={ofiStats} mid={rawMid} />
           </Panel>
 
           {/* Walls + Liquidity */}

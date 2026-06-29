@@ -268,6 +268,10 @@ export interface LiquidityZone {
   induced: boolean;           // true = level was swept and reversed (inducement)
   zoneHigh: number;           // cluster price range top
   zoneLow: number;            // cluster price range bottom
+  // v3 additions (optional — for confluence & UI labelling)
+  volumeWeight?: number;      // alias of volumeScore (normalised 0..1)
+  zoneType?: "equal_highs" | "equal_lows" | "swing_high" | "swing_low";
+  wallConfluence?: boolean;   // true if a strong order-book wall sits inside zone
 }
 
 export function detectLiquidityZones(

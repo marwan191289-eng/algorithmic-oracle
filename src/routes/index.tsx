@@ -11,6 +11,8 @@ import {
   fmtUsd,
 } from "@/lib/binance";
 import { useLiveDepth, useLiveTicker } from "@/hooks/useBinance";
+import { useCVD } from "@/hooks/useCVD";
+import { CVDPanel } from "@/components/trading/CVDPanel";
 import {
   computeBookMetrics,
   computePriceMetrics,
@@ -180,6 +182,8 @@ function SymbolView({
 }) {
   const { book, connected } = useLiveDepth(symbol);
   const { ticker, flash } = useLiveTicker(symbol);
+  const cvdStats = useCVD(book, book ? (book.bids[0]?.price + book.asks[0]?.price) / 2 : 0);
+
 
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
@@ -284,41 +288,53 @@ function SymbolView({
     }
   }, [zones, alertSettings.stopHuntProbThreshold, symbol]);
 
-  // ─── Auto-save snapshot for PDF report ────────────────────────────────
-  useEffect(() => {
-    if (!metrics || !walls || !priceMetrics || !verdict) return;
-    saveSnapshotRef.current({
-      symbol,
-      interval,
-      capturedAt: Date.now(),
-      mid: metrics.mid,
-      ticker,
-      metrics,
-      walls,
-      zones,
-      priceMetrics,
-      verdict,
-      wallSettings,
-      quality: quality ?? null,
-      chartImage: null,
-    });
-  }, [symbol, interval, metrics, walls, zones, priceMetrics, verdict, ticker, wallSettings, quality]);
+  // ─── Auto-save snapshot + log live signal ─────────────────────────────
+  // IMPORTANT: an effect with dependencies on `metrics`, `walls`, `zones`,
+  // `verdict` (all re-created by useMemo on every render) caused
+  // "Maximum update depth exceeded" — every store update re-rendered the
+  // dashboard, which produced new memoised objects, which re-triggered
+  // the effect. We now snapshot on a fixed interval using refs.
+  const latestRef = useRef({
+    symbol, interval, metrics, walls, zones, priceMetrics,
+    verdict, ticker, wallSettings, quality,
+  });
+  latestRef.current = {
+    symbol, interval, metrics, walls, zones, priceMetrics,
+    verdict, ticker, wallSettings, quality,
+  };
 
-  // ─── Log live signal for Live-vs-Backtest comparison ──────────────────
-  const lastLogRef = useRef(0);
   useEffect(() => {
-    if (!verdict || !metrics) return;
-    const now = Date.now();
-    if (now - lastLogRef.current < 5000) return; // ≥5s spacing
-    lastLogRef.current = now;
-    pushLiveSignalRef.current({
-      t: now, symbol, interval,
-      score: verdict.score,
-      side: (verdict as any).targets?.side ?? "none",
-      confidence: (verdict as any).confidence ?? 0,
-      mid: metrics.mid,
-    });
-  }, [verdict, metrics, symbol, interval]);
+    const id = setInterval(() => {
+      const L = latestRef.current;
+      if (!L.metrics || !L.walls || !L.priceMetrics || !L.verdict) return;
+      saveSnapshotRef.current({
+        symbol: L.symbol,
+        interval: L.interval,
+        capturedAt: Date.now(),
+        mid: L.metrics.mid,
+        ticker: L.ticker,
+        metrics: L.metrics,
+        walls: L.walls,
+        zones: L.zones,
+        priceMetrics: L.priceMetrics,
+        verdict: L.verdict,
+        wallSettings: L.wallSettings,
+        quality: L.quality ?? null,
+        chartImage: null,
+      });
+      pushLiveSignalRef.current({
+        t: Date.now(),
+        symbol: L.symbol,
+        interval: L.interval,
+        score: L.verdict.score,
+        side: (L.verdict as any).targets?.side ?? "none",
+        confidence: (L.verdict as any).confidence ?? 0,
+        mid: L.metrics.mid,
+      });
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
 
   if (!book || !metrics) {
     return (
@@ -453,8 +469,18 @@ function SymbolView({
             <MetricCard label="VWAP بيع" value={fmtPrice(metrics.vwapAsk)} tone="bear" />
           </div>
 
+          {/* CVD — Cumulative Volume Delta */}
+          <Panel
+            icon={<LineChart className="size-4 text-primary" />}
+            title="CVD — دلتا الحجم التراكمي (ضغط الشراء/البيع الحقيقي)"
+            extra={<span className="text-[10px] mono text-muted-foreground">يكشف القوة الحقيقية خلف الحركة السعرية · synthetic</span>}
+          >
+            <CVDPanel cvdStats={cvdStats} mid={metrics.mid} />
+          </Panel>
+
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+
             <div id="walls-panel" className="scroll-mt-24">
               <Panel
                 icon={<Crosshair className="size-4 text-primary" />}

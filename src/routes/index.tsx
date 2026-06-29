@@ -469,8 +469,18 @@ function SymbolView({
             <MetricCard label="VWAP بيع" value={fmtPrice(metrics.vwapAsk)} tone="bear" />
           </div>
 
+          {/* CVD — Cumulative Volume Delta */}
+          <Panel
+            icon={<LineChart className="size-4 text-primary" />}
+            title="CVD — دلتا الحجم التراكمي (ضغط الشراء/البيع الحقيقي)"
+            extra={<span className="text-[10px] mono text-muted-foreground">يكشف القوة الحقيقية خلف الحركة السعرية · synthetic</span>}
+          >
+            <CVDPanel cvdStats={cvdStats} mid={metrics.mid} />
+          </Panel>
+
           {/* Walls + Liquidity */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+
             <div id="walls-panel" className="scroll-mt-24">
               <Panel
                 icon={<Crosshair className="size-4 text-primary" />}

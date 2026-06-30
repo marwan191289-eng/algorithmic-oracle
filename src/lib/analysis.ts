@@ -810,16 +810,20 @@ export function institutionalScoreV2(
 
   const spreadHealth = clamp(1 - price.volatility * 30, 0, 1);
 
-  // ── 2. weighted sum — matches Python weight schema (sums to 1.0) ────
-  const weighted =
-    bookImbalance       * 0.25 +  // proximity imbalance (Python: 0.25)
-    proximityPressure   * 0.20 +  // wall proximity pressure (Python: 0.20)
-    momentum            * 0.15 +  // price momentum (Python: 0.15)
-    rsiPenalty          * 0.15 +  // RSI damping (Python: 0.15)
-    volumeTrend         * 0.15 +  // volume direction (Python: 0.15)
-    microDrift          * 0.10;   // micro drift (Python: 0.10)
+  // ── 2. weighted sum — regime-aware weights ────────────────────────
+  const { regime, chopLevel } = detectRegime(klines);
+  const W = REGIME_WEIGHTS[regime];
 
-  const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth);
+  const weighted =
+    bookImbalance       * W.book +
+    proximityPressure   * W.wall +
+    momentum            * W.mom +
+    rsiPenalty          * W.rsi +
+    volumeTrend         * W.vol +
+    microDrift          * W.micro;
+
+  const chopDampen = 1 - chopLevel * 0.35;
+  const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth) * chopDampen;
   const scoreRaw = Math.round(raw * 100);
 
   // ── 3. EMA smoothing — kills frame-to-frame jitter ─────────────────
@@ -836,10 +840,27 @@ export function institutionalScoreV2(
   const neg = signs.filter((s) => s === -1).length;
   const dominant = Math.max(pos, neg);
   const total = pos + neg || 1;
-  const agreementRatio = dominant / total;           // 0..1 (Python: |sum(signs)| / len)
-  const qualityFactor = clamp(spreadHealth, 0, 1);   // proxy for data quality
+  const agreementRatio = dominant / total;
+  const qualityFactor = clamp(spreadHealth, 0, 1);
+
+  // Entropy-based uncertainty: when components are scattered, confidence drops
+  // even if agreement ratio looks decent. This catches "3 bullish + 2 bearish" cases.
+  const vals = [bookImbalance, proximityPressure, momentum, microDrift, volumeTrend];
+  const absVals = vals.map(Math.abs);
+  const maxAbs = Math.max(...absVals, 0.01);
+  const normalized = absVals.map(v => v / maxAbs);
+  const entropy = -normalized.reduce((sum, p) => {
+    const safe = Math.max(p, 0.001);
+    return sum + safe * Math.log2(safe);
+  }, 0);
+  const maxEntropy = Math.log2(vals.length);
+  const entropyFactor = 1 - clamp(entropy / maxEntropy, 0, 1); // 0 = scattered, 1 = aligned
+
+  // False-signal filter: high chop + low agreement = don't trust it
+  const trustFactor = Math.min(agreementRatio, entropyFactor) * (1 - chopLevel * 0.25);
+
   const confidence = Math.round(
-    clamp(100 * (0.6 * agreementRatio + 0.4 * qualityFactor), 0, 100)
+    clamp(100 * (0.55 * trustFactor + 0.25 * qualityFactor + 0.20 * (1 - chopLevel)), 0, 100)
   );
 
   // ── 5. bias label ───────────────────────────────────────────────────
@@ -903,7 +924,8 @@ export function institutionalScoreV2(
     reasoning.push(`أقرب دعم قوي: ${walls.strongestSupport.price.toFixed(4)} (${fmtUsdShort(walls.strongestSupport.usd)})`);
   if (walls.strongestResistance)
     reasoning.push(`أقرب مقاومة قوية: ${walls.strongestResistance.price.toFixed(4)} (${fmtUsdShort(walls.strongestResistance.usd)})`);
-  reasoning.push(`الإجماع: ${dominant}/${total} مكوّن → ثقة ${confidence}% (60% إجماع + 40% جودة بيانات)`);
+  reasoning.push(`النظام: ${regime === "trending" ? "ترند واضح" : regime === "volatile" ? "متقلب مرتفع" : "متذبذب/مجموع"} — أوزان مرجحة حسب النظام`);
+    reasoning.push(`الإجماع: ${dominant}/${total} مكوّن → ثقة ${confidence}% (إنتروبي + جودة + نسبة الضجيز)`);
   if (price.volatility > 0.03)
     reasoning.push(`تحذير: تقلب مرتفع ${(price.volatility * 100).toFixed(2)}%`);
 
@@ -938,5 +960,58 @@ export function computeATR(klines: Kline[], period = 14): number {
     sum += Math.max(k.high - k.low, Math.abs(k.high - prev.close), Math.abs(k.low - prev.close));
   }
   return sum / period;
+}
+
+// ── REGIME DETECTION ──────────────────────────────────────────────────────────────────
+// Detects whether market is trending, ranging, or choppy/volatile.
+// Returns regime + chopLevel (0..1, higher = more noise = dampen signals).
+
+type Regime = "trending" | "ranging" | "volatile";
+
+const REGIME_WEIGHTS: Record<Regime, { book: number; wall: number; mom: number; rsi: number; vol: number; micro: number }> = {
+  // Trending: momentum + volume matter more; RSI less (follow trend)
+  trending: { book: 0.22, wall: 0.18, mom: 0.22, rsi: 0.08, vol: 0.20, micro: 0.10 },
+  // Ranging: mean-reversion (RSI + microDrift) matter more; momentum less
+  ranging:  { book: 0.28, wall: 0.22, mom: 0.08, rsi: 0.22, vol: 0.10, micro: 0.10 },
+  // Volatile: book + walls matter most; momentum suppressed (whipsaws)
+  volatile: { book: 0.30, wall: 0.25, mom: 0.05, rsi: 0.10, vol: 0.20, micro: 0.10 },
+};
+
+function detectRegime(klines: Kline[]): { regime: Regime; chopLevel: number } {
+  if (klines.length < 30) return { regime: "ranging", chopLevel: 0.3 };
+  const n = klines.length;
+  const closes = klines.map(k => k.close);
+
+  // ATR% — volatility proxy
+  const atr = computeATR(klines, 14);
+  const atrPct = atr / (closes[closes.length - 1] || 1);
+
+  // ADX proxy — directional strength from consecutive same-direction bars
+  let directional = 0;
+  for (let i = n - 20; i < n; i++) {
+    const d = closes[i] - closes[i - 1];
+    directional += Math.abs(d);
+  }
+  const totalMove = Math.abs(closes[n - 1] - closes[n - 20]);
+  const adxProxy = directional > 0 ? totalMove / directional : 0; // 0 = chop, 1 = trend
+
+  // Bollinger width proxy
+  const ma20 = avg(closes.slice(-20));
+  const std20 = Math.sqrt(avg(closes.slice(-20).map(c => (c - ma20) ** 2)));
+  const bbWidth = (std20 / ma20) * 100;
+
+  // Chop detection: price oscillates around mean (low net move, high total move)
+  const chopLevel = clamp(1 - adxProxy, 0, 1); // 0 = clean trend, 1 = pure chop
+
+  let regime: Regime;
+  if (atrPct > 0.025 || bbWidth > 2.5) {
+    regime = "volatile";
+  } else if (adxProxy > 0.55 && atrPct > 0.008) {
+    regime = "trending";
+  } else {
+    regime = "ranging";
+  }
+
+  return { regime, chopLevel };
 }
 

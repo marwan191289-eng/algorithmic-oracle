@@ -9,6 +9,7 @@ import {
   Zap, CheckCircle2, XCircle, Clock, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Signature } from "@/components/ui/Signature";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, AreaChart, Area,
@@ -622,6 +623,9 @@ function ComparePage() {
           </>
         )}
       </main>
+      <footer className="border-t border-border mt-8">
+        <Signature />
+      </footer>
     </div>
   );
 }

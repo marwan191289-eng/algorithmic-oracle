@@ -165,4 +165,40 @@
     0% { background-color: var(--bear-soft); }
     100% { background-color: transparent; }
   }
+
+  /* ═══ Neon Signature ═══ */
+  .neon-signature {
+    color: var(--neon);
+    text-shadow:
+      0 0 4px var(--neon),
+      0 0 12px var(--neon),
+      0 0 24px var(--neon),
+      0 0 48px var(--neon);
+    animation: neon-flicker 3s ease-in-out infinite;
+  }
+  @keyframes neon-flicker {
+    0%, 18%, 22%, 25%, 53%, 57%, 100% {
+      text-shadow:
+        0 0 4px var(--neon),
+        0 0 12px var(--neon),
+        0 0 24px var(--neon),
+        0 0 48px var(--neon);
+      opacity: 1;
+    }
+    20%, 24%, 55% {
+      text-shadow: none;
+      opacity: 0.6;
+    }
+  }
+
+  .neon-line {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--neon), transparent);
+    animation: neon-line-slide 4s ease-in-out infinite;
+  }
+  @keyframes neon-line-slide {
+    0% { opacity: 0.3; transform: scaleX(0.3); }
+    50% { opacity: 1; transform: scaleX(1); }
+    100% { opacity: 0.3; transform: scaleX(0.3); }
+  }
 }

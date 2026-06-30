@@ -12,6 +12,7 @@ import {
   TrendingUp as TrendUp, TrendingDown as TrendDn, Minus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Signature } from "@/components/ui/Signature";
 
 export const Route = createFileRoute("/backtest")({
   head: () => ({ meta: [{ title: "Backtest — WhaleEye" }] }),
@@ -239,6 +240,9 @@ function BacktestPage() {
           </div>
         )}
       </main>
+      <footer className="border-t border-border mt-8">
+        <Signature />
+      </footer>
     </div>
   );
 }

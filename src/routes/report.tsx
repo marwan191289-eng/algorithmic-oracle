@@ -4,6 +4,7 @@ import { useSession } from "@/lib/session-store";
 import { fmtPct, fmtPrice, fmtUsd } from "@/lib/binance";
 import { ArrowLeft, Download, FileText, Printer } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Signature } from "@/components/ui/Signature";
 
 export const Route = createFileRoute("/report")({
   head: () => ({
@@ -310,8 +311,11 @@ function QualitySection({ snap }: { snap: Snap }) {
 
 function Footer() {
   return (
-    <div className="pt-4 border-t border-border text-[10px] mono text-muted-foreground text-center">
-      WhaleEye · مصدر البيانات: Binance Public API · هذا التقرير لأغراض تحليلية ولا يُعد توصية استثمارية
+    <div className="pt-4 border-t border-border text-center space-y-3">
+      <Signature />
+      <div className="text-[10px] mono text-muted-foreground">
+        WhaleEye · مصدر البيانات: Binance Public API · هذا التقرير لأغراض تحليلية ولا يُعد توصية استثمارية
+      </div>
     </div>
   );
 }

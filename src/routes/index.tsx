@@ -160,12 +160,17 @@ function Header() {
   );
 }
 
+import { Signature } from "@/components/ui/Signature";
+
 function Footer() {
   return (
     <footer className="border-t border-border mt-8">
-      <div className="max-w-[1600px] mx-auto px-4 md:px-6 py-6 text-center text-[11px] text-muted-foreground">
-        البيانات من Binance Public WebSocket · هذه أداة تحليلية ولا تُعد توصية
-        استثمارية · إدارة المخاطر مسؤوليتك
+      <div className="max-w-[1600px] mx-auto px-4 md:px-6 py-6 text-center">
+        <Signature />
+        <div className="text-[11px] text-muted-foreground mt-2">
+          البيانات من Binance Public WebSocket · هذه أداة تحليلية ولا تُعد توصية
+          استثمارية · إدارة المخاطر مسؤوليتك
+        </div>
       </div>
     </footer>
   );

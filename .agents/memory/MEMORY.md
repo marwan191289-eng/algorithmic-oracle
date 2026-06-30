@@ -1,6 +1,9 @@
 - [Zustand action ref pattern](zustand-action-refs.md) — never put Zustand action selectors in useEffect deps; use useRef + getState() instead
 - [Analysis algorithm upgrades](analysis-algorithm.md) — proximity imbalance, log-vol momentum, Python-aligned confidence (60% agreement + 40% quality) all live in analysis.ts
-- [RL Agent panel pattern](rl-agent-panel.md) — upgraded to 14-feature / 32-16-3 layers / REINFORCE with experience replay; consensus/conviction system over last 7 ticks
-- [Backtest engine v2](backtest-v2.md) — signalAt rewritten to use same weights as institutionalScoreV2; autoCalibrate() added: ATR%+ADX proxy+EMA alignment → regime detection
-- [CVD calculation](cvd-calculation.md) — book-absorption from snapshots is unreliable (captures cancellations, not just trades); use price-direction × notional × imbalance-amplifier instead
-- [Compare page inject pattern](compare-inject.md) — liveSignalLog only fills when dashboard open; injectBTAsLive() populates it instantly from BT trades for immediate comparison
+- [RL Agent panel pattern](rl-agent-panel.md) — upgraded to 14-feature / 32-16-3 layers / REINFORCE with experience replay; consensus/conviction system over last 7 ticks; weights update online via policyGradientUpdate
+- [Backtest engine v2](backtest-v2.md) — signalAt rewritten to use same weights as institutionalScoreV2; synthetic book from OHLCV; Sharpe/Sortino/Calmar/consecutive streaks added; autoCalibrate() detects regime (trending/ranging/volatile) from ATR%+ADX+EMA alignment+BB width
+- [CVD calculation](cvd-calculation.md) — book-absorption from snapshots is unreliable (captures cancellations, not just trades); use price-direction × notional × imbalance-amplifier instead; divergenceType field (hidden_selling/hidden_buying); soft decay (0.9998)
+- [Compare page inject pattern](compare-inject.md) — liveSignalLog only fills when dashboard open; injectBTAsLive() populates instantly from BT trades; strategy assessment banner (ok/warn/bad)
+- [Liquidity zones v2](liquidity-zones-v2.md) — dual clustering (0.12% tight + 0.22% normal), volume z-score weighting, inducement detection, zoneType labels, wallConfluence detection
+- [OFI heatmap](ofi-heatmap.md) — useOFI tracks per-level qty deltas between snapshots; $10 noise floor; renders bid/ask flow bars + rolling 10-tick net OFI + area chart
+- [SMC detector](smc-detector.md) — detectSMC() in smc.ts: pivot N=3, BOS/CHOCH via swing comparison, FVG 3-candle pattern, OB = last opposing candle before BOS; klines already fetched in index.tsx (15s refetch)

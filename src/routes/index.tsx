@@ -1,3 +1,4 @@
+// index.tsx
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +13,11 @@ import {
 } from "@/lib/binance";
 import { useLiveDepth, useLiveTicker } from "@/hooks/useBinance";
 import { useCVD } from "@/hooks/useCVD";
+import { useOFI } from "@/hooks/useOFI";
 import { CVDPanel } from "@/components/trading/CVDPanel";
+import { OFIHeatmap } from "@/components/trading/OFIHeatmap";
+import { detectSMC } from "@/lib/smc";
+import { SMCPanel } from "@/components/trading/SMCPanel";
 import {
   computeBookMetrics,
   computePriceMetrics,
@@ -36,7 +41,7 @@ import { useQualitySlopeAlert } from "@/hooks/useQualitySlopeAlert";
 import { useSession } from "@/lib/session-store";
 import { cn } from "@/lib/utils";
 import { RLAgentPanel } from "@/components/trading/RLAgentPanel";
-import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare } from "lucide-react";
+import { Radio, Zap, BookOpen, Crosshair, LineChart, FileText, Sliders, FlaskConical, AlertTriangle, GitCompare, Activity } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -187,9 +192,13 @@ function SymbolView({
 }) {
   const { book, connected } = useLiveDepth(symbol);
   const { ticker, flash } = useLiveTicker(symbol);
-  const cvdStats = useCVD(book, book ? (book.bids[0]?.price + book.asks[0]?.price) / 2 : 0);
 
-
+  // Compute mid directly from book (can't use metrics here — hooks must precede useMemo)
+  const rawMid = book
+    ? ((book.bids[0]?.price ?? 0) + (book.asks[0]?.price ?? 0)) / 2
+    : 0;
+  const cvdStats = useCVD(book, rawMid);
+  const ofiStats = useOFI(book, rawMid);
   const wallSettings = useSession((s) => s.wallSettings);
   const quality = useSession((s) => s.quality.bySymbol[symbol]);
   const alertSettings = useSession((s) => s.alertSettings);
@@ -235,6 +244,10 @@ function SymbolView({
   const zones = useMemo(
     () => (klines && metrics ? detectLiquidityZones(klines, metrics.mid, { walls: walls ?? undefined }) : []),
     [klines, metrics, walls]
+  );
+  const smcAnalysis = useMemo(
+    () => (klines ? detectSMC(klines) : null),
+    [klines]
   );
   const prevScoreRef = useRef<number | undefined>(undefined);
   const verdict = useMemo(() => {
@@ -294,11 +307,6 @@ function SymbolView({
   }, [zones, alertSettings.stopHuntProbThreshold, symbol]);
 
   // ─── Auto-save snapshot + log live signal ─────────────────────────────
-  // IMPORTANT: an effect with dependencies on `metrics`, `walls`, `zones`,
-  // `verdict` (all re-created by useMemo on every render) caused
-  // "Maximum update depth exceeded" — every store update re-rendered the
-  // dashboard, which produced new memoised objects, which re-triggered
-  // the effect. We now snapshot on a fixed interval using refs.
   const latestRef = useRef({
     symbol, interval, metrics, walls, zones, priceMetrics,
     verdict, ticker, wallSettings, quality,
@@ -339,7 +347,6 @@ function SymbolView({
     }, 5000);
     return () => clearInterval(id);
   }, []);
-
 
   if (!book || !metrics) {
     return (
@@ -474,94 +481,203 @@ function SymbolView({
             <MetricCard label="VWAP بيع" value={fmtPrice(metrics.vwapAsk)} tone="bear" />
           </div>
 
-          {/* CVD — Cumulative Volume Delta */}
-          <Panel
-            icon={<LineChart className="size-4 text-primary" />}
-            title="CVD — دلتا الحجم التراكمي (ضغط الشراء/البيع الحقيقي)"
-            extra={<span className="text-[10px] mono text-muted-foreground">يكشف القوة الحقيقية خلف الحركة السعرية · synthetic</span>}
-          >
-            <CVDPanel cvdStats={cvdStats} mid={metrics.mid} />
-          </Panel>
+         {/* CVD — Cumulative Volume Delta */}
+                    <Panel
+                      icon={<Activity className="size-4 text-primary" />}
+                      title="مؤشر CVD — دلتا حجم التداول التراكمي"
+                      extra={
+                        <div className="flex items-center gap-2">
+                          {cvdStats.divergence && (
+                            <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-gold/40 text-gold bg-gold/10">
+                              ⚠ تباين
+                            </span>
+                          )}
+                          <span className={cn(
+                            "text-[10px] mono px-2 py-0.5 rounded-full border",
+                            cvdStats.trend === "bullish" ? "border-bull/40 text-bull bg-bull/10"
+                            : cvdStats.trend === "bearish" ? "border-bear/40 text-bear bg-bear/10"
+                            : "border-border text-muted-foreground"
+                          )}>
+                            {cvdStats.trend === "bullish" ? "↑ شرائي"
+                             : cvdStats.trend === "bearish" ? "↓ بيعي"
+                             : "محايد"}
+                          </span>
+                          <span className="text-[10px] mono text-muted-foreground">من دفتر الأوامر</span>
+                        </div>
+                      }
+                    >
+                      <CVDPanel cvdStats={cvdStats} mid={rawMid} />
+                    </Panel>
 
-          {/* Walls + Liquidity */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+                    {/* OFI — Order Flow Imbalance Heatmap */}
+                    <Panel
+                      minH="min-h-[420px]"
+                      icon={<GitCompare className="size-4 text-primary" />}
+                      title="OFI — خريطة حرارة تدفق الأوامر"
+                      extra={
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            "text-[10px] mono px-2 py-0.5 rounded-full border",
+                            ofiStats.pressure === "buy"  ? "border-bull/40 text-bull bg-bull/10"
+                            : ofiStats.pressure === "sell" ? "border-bear/40 text-bear bg-bear/10"
+                            : "border-border text-muted-foreground"
+                          )}>
+                            {ofiStats.pressure === "buy" ? "↑ ضغط شراء"
+                             : ofiStats.pressure === "sell" ? "↓ ضغط بيع"
+                             : "محايد"}
+                          </span>
+                          <span className="text-[10px] mono text-muted-foreground">
+                            {ofiStats.history.length} تيكر
+                          </span>
+                        </div>
+                      }
+                    >
+                      <OFIHeatmap ofi={ofiStats} mid={rawMid} />
+                    </Panel>
 
-            <div id="walls-panel" className="scroll-mt-24">
-              <Panel
-                icon={<Crosshair className="size-4 text-primary" />}
-                title="الجدران السعرية (دعوم ومقاومات)"
-                extra={
-                  <span className="text-[10px] mono text-muted-foreground">
-                    {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
-                    {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
-                    {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
-                    {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
-                  </span>
-                }
-              >
-                {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
-              </Panel>
-            </div>
+                    {/* SMC — Smart Money Concepts */}
+                    {smcAnalysis && (
+                      <Panel
+                        minH="min-h-[300px]"
+                        icon={<GitCompare className="size-4 text-gold" />}
+                        title="SMC — بصمات الأموال الذكية"
+                        extra={
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "text-[10px] mono px-2 py-0.5 rounded-full border",
+                              smcAnalysis.trend === "up"   ? "border-bull/40 text-bull bg-bull/10"
+                              : smcAnalysis.trend === "down" ? "border-bear/40 text-bear bg-bear/10"
+                              : "border-border text-muted-foreground"
+                            )}>
+                              {smcAnalysis.trend === "up" ? "↑ هيكل صاعد"
+                               : smcAnalysis.trend === "down" ? "↓ هيكل هابط"
+                               : "متذبذب"}
+                            </span>
+                            <span className="text-[10px] mono text-muted-foreground">
+                              BOS · CHOCH · FVG · OB · {interval}
+                            </span>
+                          </div>
+                        }
+                      >
+                        <SMCPanel
+                          analysis={smcAnalysis}
+                          currentPrice={metrics?.mid ?? rawMid}
+                          interval={interval}
+                        />
+                      </Panel>
+                    )}
 
-            <div id="zones-panel" className="scroll-mt-24">
-              <Panel
-                icon={<Crosshair className="size-4 text-gold" />}
-                title="مناطق صيد الستوبات (السيولة)"
-                extra={<span className="text-[10px] mono text-muted-foreground">قمم/قيعان متساوية على {interval}</span>}
-              >
-                <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
-              </Panel>
-            </div>
-          </div>
+                    {/* Walls + Liquidity */}
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
 
-        </>
-      )}
-    </div>
-  );
-}
+                      <div id="walls-panel" className="scroll-mt-24">
+                        <Panel
+                          icon={<Crosshair className="size-4 text-primary" />}
+                          title="الجدران السعرية (دعوم ومقاومات)"
+                          extra={
+                            <span className="text-[10px] mono text-muted-foreground">
+                              {walls?.used.method === "zscore" && `z ≥ ${walls.used.zThreshold}`}
+                              {walls?.used.method === "percentile" && `p${walls.used.percentile}`}
+                              {walls?.used.method === "absolute" && `≥ ${fmtUsd(walls.used.absoluteUsd)}`}
+                              {` · عمق ${walls?.used.depth} · cutoff ${fmtUsd(walls?.used.cutoffUsd ?? 0)}`}
+                            </span>
+                          }
+                        >
+                          {walls ? <WallsPanel report={walls} mid={metrics.mid} /> : null}
+                        </Panel>
+                      </div>
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "bull" | "bear" }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className={cn("mono font-bold text-base", tone === "bull" && "text-bull", tone === "bear" && "text-bear")}>
-        {value}
-      </div>
-    </div>
-  );
-}
+                      <div id="zones-panel" className="scroll-mt-24">
+                        <Panel
+                          icon={<Crosshair className="size-4 text-gold" />}
+                          title="مناطق صيد الستوبات (السيولة)"
+                          extra={
+                            <span className="text-[10px] mono text-muted-foreground">
+                              قمم/قيعان متساوية · احتمال مُعاير بالحجم · {interval}
+                            </span>
+                          }
+                        >
+                          <LiquidityZonesPanel zones={zones} mid={metrics.mid} />
+                        </Panel>
+                      </div>
+                    </div>
 
-function MetricCard({ label, value, tone }: { label: string; value: string; tone?: "bull" | "bear" }) {
-  return (
-    <div className="rounded-xl border border-border bg-card/50 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className={cn("mt-1 mono font-bold text-base", tone === "bull" && "text-bull", tone === "bear" && "text-bear")}>
-        {value}
-      </div>
-    </div>
-  );
-}
+                    {/* Developer signature */}
+                    <div className="mt-6 rounded-2xl border border-border/50 bg-card/20 px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+                      <div className="flex items-center gap-4">
+                        <div className="size-12 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center font-black text-primary text-xl select-none">
+                          م
+                        </div>
+                        <div>
+                          <div className="font-bold text-base">Marwan Negm</div>
+                          <div className="text-[12px] text-muted-foreground mt-0.5">مطوّر منصة عين الحوت · WhaleEye</div>
+                          <div className="text-[11px] mono text-muted-foreground/60 mt-0.5">Institutional Order-Flow Engine · Binance Live</div>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-1.5 text-[10px] text-muted-foreground mono select-none">
+                        <div className="flex items-center gap-1.5">
+                          <span className="size-1.5 rounded-full bg-bull animate-pulse" />
+                          <span>بيانات مباشرة · Binance WebSocket</span>
+                        </div>
+                        <div className="flex items-center gap-2 gap-y-1 flex-wrap justify-end">
+                          {["RL Agent", "CVD", "OFI", "SMC", "Liquidity Zones", "Backtest"].map(tag => (
+                            <span key={tag} className="px-2 py-0.5 rounded-full bg-primary/8 border border-primary/15 text-primary/70 text-[9px] uppercase tracking-wider">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="text-[9px] opacity-50 mt-0.5">v3.0 · {new Date().getFullYear()}</div>
+                      </div>
+                    </div>
 
-function Panel({
-  icon, title, extra, children,
-}: { icon?: React.ReactNode; title: string; extra?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <section className="rounded-2xl border border-border bg-card/40 overflow-hidden">
-      <header className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-card/60 gap-2 flex-wrap">
-        <div className="flex items-center gap-2 font-semibold text-sm">{icon}{title}</div>
-        {extra}
-      </header>
-      <div className="p-3">{children}</div>
-    </section>
-  );
-}
+                  </>
+                )}
+              </div>
+            );
+          }
 
-function LoadingSkeleton({ symbol }: { symbol: string }) {
-  return (
-    <div className="rounded-2xl border border-border bg-card/40 p-8 text-center">
-      <div className="size-12 rounded-full bg-primary/20 mx-auto mb-4 animate-pulse" />
-      <div className="font-bold text-lg">جاري الاتصال بـ Binance...</div>
-      <div className="text-sm text-muted-foreground mt-1">تحميل دفتر أوامر {symbol}</div>
-    </div>
-  );
-}
+          function Stat({ label, value, tone }: { label: string; value: string; tone?: "bull" | "bear" }) {
+            return (
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                <div className={cn("mono font-bold text-base", tone === "bull" && "text-bull", tone === "bear" && "text-bear")}>
+                  {value}
+                </div>
+              </div>
+            );
+          }
+
+          function MetricCard({ label, value, tone }: { label: string; value: string; tone?: "bull" | "bear" }) {
+            return (
+              <div className="rounded-xl border border-border bg-card/50 p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                <div className={cn("mt-1 mono font-bold text-base", tone === "bull" && "text-bull", tone === "bear" && "text-bear")}>
+                  {value}
+                </div>
+              </div>
+            );
+          }
+
+          function Panel({
+            icon, title, extra, children, minH,
+          }: { icon?: React.ReactNode; title: string; extra?: React.ReactNode; children: React.ReactNode; minH?: string }) {
+            return (
+              <section className="rounded-2xl border border-border bg-card/40 overflow-hidden">
+                <header className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-card/60 gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 font-semibold text-sm">{icon}{title}</div>
+                  {extra}
+                </header>
+                <div className={cn("p-3", minH)} style={minH ? undefined : undefined}>{children}</div>
+              </section>
+            );
+          }
+
+          function LoadingSkeleton({ symbol }: { symbol: string }) {
+            return (
+              <div className="rounded-2xl border border-border bg-card/40 p-8 text-center">
+                <div className="size-12 rounded-full bg-primary/20 mx-auto mb-4 animate-pulse" />
+                <div className="font-bold text-lg">جاري الاتصال بـ Binance...</div>
+                <div className="text-sm text-muted-foreground mt-1">تحميل دفتر أوامر {symbol}</div>
+              </div>
+            );
+          }

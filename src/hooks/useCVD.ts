@@ -1,7 +1,7 @@
 /**
  * Cumulative Volume Delta (CVD) — Improved
  *
- * aggTrade WebSocket is blocked in Replit sandbox.
+ * aggTrade WebSocket availability can vary by hosting/network environment.
  *
  * Previous approach (book absorption) was unreliable:
  *   prevAsk - askUsd captures ALL book changes (cancellations, repricings, etc.)

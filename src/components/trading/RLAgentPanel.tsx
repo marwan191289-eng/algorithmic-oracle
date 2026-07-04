@@ -47,7 +47,7 @@ interface Consensus {
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const IN   = 14;
+const IN   = 17;
 const H1   = 32;
 const H2   = 16;
 const OUT  = 3;
@@ -180,6 +180,7 @@ function buildState(
   const sprd  = c01(m.spreadPct / 0.1);
 
   if (v) {
+    const regime = v.compositeScore?.regime ?? "ranging";
     return [
       cN1(v.score / 100),
       c01(v.confidence / 100),
@@ -195,6 +196,9 @@ function buildState(
       entN,
       c01(recentWR),
       c01(Math.abs(v.components.momentum)),
+      c01(v.components.spreadHealth),
+      regime === "trending" ? 1 : 0,
+      regime === "volatile" ? 1 : 0,
     ];
   }
 
@@ -206,6 +210,7 @@ function buildState(
     microD, 0, 0, 0.5,
     sprd, cN1(m.imbalance * 0.5),
     atrPx, entN, c01(recentWR), 0,
+    c01(1 - sprd), 0, 0,
   ];
 }
 
@@ -396,7 +401,7 @@ export function RLAgentPanel({
     ? buildState(vRef.current, metrics, dispWR, probsR.current)
     : null;
 
-  const fNames = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr"];
+  const fNames = ["Score","Conf","Imbal","WallPx","Micro","Mom","VolDir","RSI","Sprd","WallImb","ATR","Entr","WinR","MomStr","SprdH","Trend","VolReg"];
   const current = log[0] ?? null;
 
   return (

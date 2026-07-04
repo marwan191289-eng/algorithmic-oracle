@@ -78,6 +78,11 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
                 color={v2.confidence >= 70 ? "bull" : v2.confidence >= 50 ? "gold" : "bear"}
               />
               <Tag
+                label="Composite"
+                value={`${v2.compositeScore.value >= 0 ? "+" : ""}${v2.compositeScore.value} · ${v2.compositeScore.regime}`}
+                color={v2.compositeScore.value >= 25 ? "bull" : v2.compositeScore.value <= -25 ? "bear" : "gold"}
+              />
+              <Tag
                 label="RSI Damping"
                 value={v2.components.rsiPenalty !== 0
                   ? `${v2.components.rsiPenalty > 0 ? "+" : ""}${(v2.components.rsiPenalty * 100).toFixed(0)}%`
@@ -164,6 +169,8 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
               {typeof v2.scoreRaw === "number" && (
                 <div className="text-muted-foreground">قبل التنعيم: {v2.scoreRaw > 0 ? "+" : ""}{v2.scoreRaw}</div>
               )}
+              <div>صحة السبريد: <span className={v2.components.spreadHealth >= 0.6 ? "text-bull" : v2.components.spreadHealth >= 0.4 ? "text-gold" : "text-bear"}>{(v2.components.spreadHealth * 100).toFixed(0)}%</span></div>
+              <div>النظام: <span className="text-primary">{v2.compositeScore.regime}</span></div>
             </div>
           </div>
         </div>

@@ -9,7 +9,10 @@ import type { Kline } from "./binance";
 import {
   computePriceMetrics,
   computeATR,
+  detectRegime,
   detectLiquidityZones,
+  REGIME_WEIGHTS,
+  type Regime,
 } from "./analysis";
 
 export type MarketPreset = "trending" | "ranging" | "volatile" | "custom";
@@ -97,7 +100,11 @@ export interface BacktestTrade {
   exitReason: string;
   // V2 components
   bookImbalanceProxy: number;
+  microDrift: number;
   microDriftProxy: number;
+  spreadHealth: number;
+  regime: Regime;
+  compositeScore: number;
   momentumAtEntry: number;
   rsiAtEntry: number;
   holdBars: number;
@@ -272,7 +279,11 @@ interface BacktestSignal {
   rsi: number;
   momentum: number;
   bookImbalanceProxy: number;
+  microDrift: number;
   microDriftProxy: number;
+  spreadHealth: number;
+  regime: Regime;
+  compositeScore: number;
   atr: number;
 }
 
@@ -286,7 +297,8 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
     return {
       score: 0, confidence: 0, side: null, reason: "warmup", confluence: false,
       nearestSupport: null, nearestResistance: null, rsi: 50, momentum: 0,
-      bookImbalanceProxy: 0, microDriftProxy: 0, atr: 0,
+      bookImbalanceProxy: 0, microDrift: 0, microDriftProxy: 0,
+      spreadHealth: 0, regime: "ranging", compositeScore: 0, atr: 0,
     };
   }
 
@@ -310,17 +322,19 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
     price.rsi <= params.rsiOversold  ?  0.4 :
     price.rsi <= rsiOS8              ?  0.2 : 0;
   const spreadHealth = clamp(1 - price.volatility * 30, 0, 1);
+  const { regime, chopLevel } = detectRegime(window);
+  const W = REGIME_WEIGHTS[regime];
 
-  // IDENTICAL to institutionalScoreV2 Python-aligned weights:
   const weighted =
-    bookImbalance     * 0.25 +
-    wallPressure      * 0.20 +
-    momentum          * 0.15 +
-    rsiPenalty        * 0.15 +
-    volumeTrend       * 0.15 +
-    microDrift        * 0.10;
+    bookImbalance     * W.book +
+    wallPressure      * W.wall +
+    momentum          * W.mom +
+    rsiPenalty        * W.rsi +
+    volumeTrend       * W.vol +
+    microDrift        * W.micro;
 
-  const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth);
+  const chopDampen = 1 - chopLevel * 0.35;
+  const raw = Math.tanh(weighted * 1.7) * (0.55 + 0.45 * spreadHealth) * chopDampen;
   const score = Math.round(raw * 100);
 
   // ── Confidence (same formula as live engine) ─────────────────────────
@@ -331,7 +345,19 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
   const dominant = Math.max(pos, neg);
   const total = pos + neg || 1;
   const agreementRatio = dominant / total;
-  const confidence = Math.round(clamp(100 * (0.6 * agreementRatio + 0.4 * spreadHealth), 0, 100));
+  const vals = [bookImbalance, wallPressure, momentum, microDrift, volumeTrend];
+  const absVals = vals.map(Math.abs);
+  const maxAbs = Math.max(...absVals, 0.01);
+  const normalized = absVals.map(v => v / maxAbs);
+  const entropy = -normalized.reduce((sum, p) => {
+    const safe = Math.max(p, 0.001);
+    return sum + safe * Math.log2(safe);
+  }, 0);
+  const entropyFactor = 1 - clamp(entropy / Math.log2(vals.length), 0, 1);
+  const trustFactor = Math.min(agreementRatio, entropyFactor) * (1 - chopLevel * 0.25);
+  const confidence = Math.round(
+    clamp(100 * (0.55 * trustFactor + 0.25 * spreadHealth + 0.20 * (1 - chopLevel)), 0, 100)
+  );
 
   // ── Entry decision ───────────────────────────────────────────────────
   const absScore = Math.abs(score);
@@ -350,6 +376,7 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
   const parts: string[] = [];
   parts.push(`Score ${score > 0 ? "+" : ""}${score}`);
   parts.push(`ثقة ${confidence}%`);
+  parts.push(`نظام ${regime}`);
   parts.push(`زخم ${(price.momentum * 100).toFixed(0)}%`);
   parts.push(`RSI ${price.rsi.toFixed(0)}`);
   if (book.confluenceScore > 0.5) parts.push("تجمّع سيولة");
@@ -364,7 +391,11 @@ function signalAtV2(klines: Kline[], upto: number, params: BacktestParams): Back
     rsi: price.rsi,
     momentum: price.momentum,
     bookImbalanceProxy: bookImbalance,
+    microDrift,
     microDriftProxy: microDrift,
+    spreadHealth,
+    regime,
+    compositeScore: score,
     atr,
   };
 }
@@ -457,7 +488,11 @@ export function runBacktest(
       nearestResistance: sig.nearestResistance,
       exitReason,
       bookImbalanceProxy: sig.bookImbalanceProxy,
+      microDrift: sig.microDrift,
       microDriftProxy: sig.microDriftProxy,
+      spreadHealth: sig.spreadHealth,
+      regime: sig.regime,
+      compositeScore: sig.compositeScore,
       momentumAtEntry: sig.momentum,
       rsiAtEntry: sig.rsi,
       holdBars: exitIdx - (i + 1),
@@ -729,7 +764,7 @@ export function backtestToCSV(r: BacktestResult): string {
   lines.push("");
   const header = [
     "i","side","score","confidence","signalReason","confluence",
-    "bookImbalProxy","microDriftProxy","momentum","rsiAtEntry",
+    "bookImbalProxy","microDrift","microDriftProxy","spreadHealth","regime","compositeScore","momentum","rsiAtEntry",
     "entryTime","entry","stop","tp","tp2","atr",
     "nearestSupport","nearestResistance",
     "exitTime","exit","holdBars","reason","exitReason","pnlPct",
@@ -738,7 +773,8 @@ export function backtestToCSV(r: BacktestResult): string {
   r.trades.forEach((t, i) => {
     const row = [
       i + 1, t.side, t.score, t.confidence, esc(t.signalReason), t.confluence,
-      t.bookImbalanceProxy.toFixed(4), t.microDriftProxy.toFixed(4),
+      t.bookImbalanceProxy.toFixed(4), t.microDrift.toFixed(4), t.microDriftProxy.toFixed(4),
+      t.spreadHealth.toFixed(4), t.regime, t.compositeScore,
       t.momentumAtEntry.toFixed(4), t.rsiAtEntry.toFixed(1),
       new Date(t.entryTime).toISOString(), t.entry.toFixed(6),
       t.stop.toFixed(6), t.tp.toFixed(6), t.tp2.toFixed(6),

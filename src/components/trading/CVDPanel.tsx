@@ -1,7 +1,7 @@
 /**
  * CVD Panel — Cumulative Volume Delta (Improved)
  * Shows real buying vs selling pressure behind the price move.
- * Source: price-driven synthetic CVD (aggTrade WS blocked in Replit).
+ * Source: price-driven synthetic CVD.
  */
 import { useMemo } from "react";
 import {

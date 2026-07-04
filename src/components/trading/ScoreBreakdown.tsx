@@ -1,20 +1,20 @@
 import { useState } from "react";
-import type { InstitutionalVerdictV2 } from "@/lib/analysis";
+import { REGIME_WEIGHTS, type InstitutionalVerdictV2 } from "@/lib/analysis";
 import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronUp, Crosshair, Target, Info } from "lucide-react";
 
-// weights mirror institutionalScoreV2
-const WEIGHTS: { key: keyof InstitutionalVerdictV2["components"]; label: string; w: number; anchor?: string }[] = [
-  { key: "bookImbalance",     label: "اختلال دفتر الأوامر", w: 0.22 },
-  { key: "proximityPressure", label: "ضغط الجدران (مرجَّح بالقرب)", w: 0.22, anchor: "#walls-panel" },
-  { key: "momentum",          label: "الزخم الخطّي", w: 0.20 },
-  { key: "microDrift",        label: "انجراف السعر الميكروي", w: 0.14 },
-  { key: "volumeTrend",       label: "اتجاه الحجم", w: 0.10 },
-  { key: "rsiPenalty",        label: "RSI mean-reversion", w: 0.12 },
-];
-
 export function ScoreBreakdown({ v }: { v: InstitutionalVerdictV2 }) {
   const [open, setOpen] = useState(false);
+  const regime = v.compositeScore?.regime ?? "ranging";
+  const rw = REGIME_WEIGHTS[regime];
+  const weights: { key: keyof InstitutionalVerdictV2["components"]; label: string; w: number; anchor?: string }[] = [
+    { key: "bookImbalance",     label: "اختلال دفتر الأوامر", w: rw.book },
+    { key: "proximityPressure", label: "ضغط الجدران (مرجَّح بالقرب)", w: rw.wall, anchor: "#walls-panel" },
+    { key: "momentum",          label: "الزخم الخطّي", w: rw.mom },
+    { key: "microDrift",        label: "انجراف السعر الميكروي", w: rw.micro },
+    { key: "volumeTrend",       label: "اتجاه الحجم", w: rw.vol },
+    { key: "rsiPenalty",        label: "RSI mean-reversion", w: rw.rsi },
+  ];
 
   // why no trade?
   const gates: string[] = [];
@@ -23,7 +23,7 @@ export function ScoreBreakdown({ v }: { v: InstitutionalVerdictV2 }) {
   if (v.components.spreadHealth < 0.4) gates.push(`السبريد/التقلّب غير صحي (${(v.components.spreadHealth*100).toFixed(0)}%)`);
 
   // contributions (raw component × weight × 100, before tanh)
-  const contribs = WEIGHTS.map((w) => ({
+  const contribs = weights.map((w) => ({
     ...w,
     val: (v.components as any)[w.key] as number,
     contribution: ((v.components as any)[w.key] as number) * w.w * 100,
@@ -44,7 +44,7 @@ export function ScoreBreakdown({ v }: { v: InstitutionalVerdictV2 }) {
         <div className="px-3 pb-3 space-y-3">
           <div className="text-[11px] text-muted-foreground">
             الدرجة النهائية ناتجة عن مجموع مرجَّح للمكوّنات الستة، ثم تنعيم EMA، وأخيراً
-            تعديل بصحة السبريد. النسب أدناه تُظهر إسهام كل مكوّن في الدرجة.
+            تعديل بصحة السبريد وحالة السوق ({regime}). النسب أدناه تُظهر إسهام كل مكوّن في الدرجة.
           </div>
 
           {/* Contribution bars */}
@@ -84,6 +84,7 @@ export function ScoreBreakdown({ v }: { v: InstitutionalVerdictV2 }) {
             <Mini label="الدرجة قبل التنعيم" value={`${v.scoreRaw >= 0 ? "+" : ""}${v.scoreRaw}`} />
             <Mini label="الدرجة بعد EMA" value={`${v.score >= 0 ? "+" : ""}${v.score}`}
                   tone={v.score > 25 ? "bull" : v.score < -25 ? "bear" : "neutral"} />
+            <Mini label="النظام" value={regime} />
             <Mini label="ثقة الإشارة" value={`${v.confidence}%`}
                   tone={v.confidence >= 70 ? "bull" : v.confidence >= 55 ? "neutral" : "bear"} />
           </div>

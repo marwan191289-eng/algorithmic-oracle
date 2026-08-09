@@ -30,7 +30,9 @@ export function useLiveDepth(symbol: string) {
   const poll = useCallback(async () => {
     if (!aliveRef.current) return;
     try {
+      const t0 = Date.now();
       const data = await fetchDepth(symbol, 100);
+      const rtt = Date.now() - t0; // real round-trip latency of the depth request
       if (!aliveRef.current) return;
       setBook(data);
       setConnected(true);
@@ -46,7 +48,7 @@ export function useLiveDepth(symbol: string) {
         symbol,
         connected: true,
         updateRateHz: rate,
-        latencyMs: 0,
+        latencyMs: rtt,
         lastMsgAt: now,
         totalMessages: totalMsgsRef.current,
         disconnects: disconnectsRef.current,

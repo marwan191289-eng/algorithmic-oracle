@@ -116,7 +116,7 @@ export function QualityBlockNotice({ symbol }: { symbol: string }) {
       <div className="font-bold text-lg">تم حجب عرض النتائج — جودة البيانات منخفضة</div>
       <div className="text-sm text-muted-foreground mt-1 mono">
         الدقة الحالية {q?.score ?? 0}/100 · الحد المطلوب {min}/100 · {q?.connected ? "متصل" : "غير متصل"} ·
-        {" "}تأخر {(q?.latencyMs ?? 0).toFixed(0)}ms · تحديث {(q?.updateRateHz ?? 0).toFixed(1)}Hz
+        {" "}زمن الطلب {(q?.latencyMs ?? 0).toFixed(0)}ms · تحديث {(q?.updateRateHz ?? 0).toFixed(1)}Hz
       </div>
       <div className="text-xs text-muted-foreground mt-3">
         ستظهر النتائج تلقائياً عند تحسن الاتصال، أو يمكنك إيقاف الحجب من شريط التدقيق أعلاه.

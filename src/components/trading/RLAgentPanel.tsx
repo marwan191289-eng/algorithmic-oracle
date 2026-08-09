@@ -424,15 +424,13 @@ export function RLAgentPanel({
           <div>
             <div className="font-bold text-sm flex items-center gap-2">
               RL Agent — عين الحوت
-              {active && (
-                <>
-                  <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 uppercase tracking-wider">LIVE</span>
-                  {dispStep > 0 && (
-                    <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-bull/20 text-bull border border-bull/30 uppercase tracking-wider flex items-center gap-0.5">
-                      <Brain className="size-2.5" /> يتعلم
-                    </span>
-                  )}
-                </>
+              <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-muted/30 text-muted-foreground border border-border uppercase tracking-wider">
+                in-browser · بدون نموذج مُدرَّب مسبقاً
+              </span>
+              {active && dispStep > 0 && (
+                <span className="text-[9px] mono px-1.5 py-0.5 rounded-full bg-bull/20 text-bull border border-bull/30 uppercase tracking-wider flex items-center gap-0.5">
+                  <Brain className="size-2.5" /> يتعلم
+                </span>
               )}
             </div>
             <div className="text-[10px] text-muted-foreground">
@@ -440,7 +438,7 @@ export function RLAgentPanel({
                 ? thinking
                   ? "جاري التحليل..."
                   : `تيكر #${tickR.current} · خطوات: ${dispStep} · ε=${(dispExpl*100).toFixed(0)}% · توافق آخر ${CONSENSUS_WINDOW}`
-                : "REINFORCE · مكافأة معيَّرة-ATR · إعادة تجربة ذات أولوية · توافق إجماعي"
+                : "REINFORCE يتدرّب داخل المتصفح من الصفر — يُصفَّر عند إعادة التحميل، وليس مصدر قرار مستقل"
               }
             </div>
           </div>

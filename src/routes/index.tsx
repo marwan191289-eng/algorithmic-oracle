@@ -384,7 +384,7 @@ function SymbolView({
                     : "border-muted text-muted-foreground"
                 )}
               >
-                {connected ? "● مباشر" : "○ يتصل..."}
+                {connected ? "● استقصاء 1ث" : "○ يتصل..."}
               </span>
               <span className="text-[10px] mono px-2 py-0.5 rounded border border-primary/30 text-primary bg-primary/10">
                 {interval.toUpperCase()}

@@ -8,7 +8,7 @@ import path from "path";
 export default defineConfig({
   plugins: [
     tanstackStart({
-      server: { entry: "src/start.ts" },
+      server: { entry: "server" },
     }),
     react(),
     tailwindcss(),

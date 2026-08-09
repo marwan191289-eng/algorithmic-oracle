@@ -4,7 +4,7 @@ import { createServerFn } from "@tanstack/react-start";
 const BINANCE_BASE = "https://api.binance.com";
 
 export const binanceProxy = createServerFn({ method: "GET" })
-  .validator((d: { path: string }) => d)
+  .inputValidator((d: { path: string }) => d)
   .handler(async ({ data }) => {
     const r = await fetch(`${BINANCE_BASE}${data.path}`);
     if (!r.ok) {

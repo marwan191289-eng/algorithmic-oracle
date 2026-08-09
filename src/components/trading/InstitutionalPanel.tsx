@@ -114,9 +114,9 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
         </div>
       </div>
 
-      {/* Confidence + Trade plan (V2) */}
+      {/* Confidence + Trade plan (V2) — component readings live in ScoreBreakdown only */}
       {hasV2 && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <div className="rounded-xl border border-border bg-card/40 p-3">
             <div className="text-[10px] uppercase tracking-wider text-muted-foreground">ثقة الإشارة</div>
             <div className={cn(
@@ -124,7 +124,7 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
               v2.confidence >= 70 ? "text-bull" : v2.confidence >= 50 ? "text-gold" : "text-bear"
             )}>{v2.confidence}%</div>
             <div className="text-[10px] mono text-muted-foreground mt-1">
-              إجماع المكوّنات: {v2.agreement >= 0 ? "+" : ""}{v2.agreement}
+              إجماع المكوّنات: {v2.agreement >= 0 ? "+" : ""}{v2.agreement} · صحة السبريد {(v2.components.spreadHealth * 100).toFixed(0)}%
             </div>
             <ConfidenceBar pct={v2.confidence} />
           </div>
@@ -151,38 +151,19 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
               </div>
             )}
           </div>
-          <div className="rounded-xl border border-border bg-card/40 p-3">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">قراءة ميكروية</div>
-            <div className="mono text-[11px] mt-1 space-y-0.5">
-              <div className="flex items-center gap-1">
-                <SignIcon v={v2.components.bookImbalance} />
-                قرب الدفتر: <span className={v2.components.bookImbalance > 0 ? "text-bull" : "text-bear"}>{(v2.components.bookImbalance * 100).toFixed(0)}</span>
-              </div>
-              <div>انجراف ميكرو: <span className={v2.components.microDrift > 0 ? "text-bull" : "text-bear"}>{(v2.components.microDrift * 100).toFixed(0)}</span></div>
-              <div>قرب الجدران: <span className={v2.components.proximityPressure > 0 ? "text-bull" : "text-bear"}>{(v2.components.proximityPressure * 100).toFixed(0)}</span></div>
-              <div>تخفيف RSI: <span className={v2.components.rsiPenalty > 0 ? "text-bull" : v2.components.rsiPenalty < 0 ? "text-bear" : "text-muted-foreground"}>{(v2.components.rsiPenalty * 100).toFixed(0)}</span></div>
-              {typeof v2.scoreRaw === "number" && (
-                <div className="text-muted-foreground">قبل التنعيم: {v2.scoreRaw > 0 ? "+" : ""}{v2.scoreRaw}</div>
-              )}
-              <div>صحة السبريد: <span className={v2.components.spreadHealth >= 0.6 ? "text-bull" : v2.components.spreadHealth >= 0.4 ? "text-gold" : "text-bear"}>{(v2.components.spreadHealth * 100).toFixed(0)}%</span></div>
-              <div>النظام: <span className="text-primary">{v2.compositeScore.regime}</span></div>
-            </div>
-          </div>
         </div>
       )}
 
-      {/* Component bars */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-        <Comp label="دفتر القرب" value={verdict.components.bookImbalance} />
-        <Comp label="ضغط الجدران" value={verdict.components.wallPressure} />
-        <Comp label="الزخم" value={verdict.components.momentum} />
-        <Comp label="اتجاه الحجم" value={verdict.components.volumeTrend} />
-        <Comp
-          label="صحة الفارق"
-          value={verdict.components.spreadHealth}
-          unsigned
-        />
-      </div>
+      {/* Component bars — only for the legacy (non-V2) verdict shape */}
+      {!hasV2 && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <Comp label="دفتر القرب" value={verdict.components.bookImbalance} />
+          <Comp label="ضغط الجدران" value={verdict.components.wallPressure} />
+          <Comp label="الزخم" value={verdict.components.momentum} />
+          <Comp label="اتجاه الحجم" value={verdict.components.volumeTrend} />
+          <Comp label="صحة الفارق" value={verdict.components.spreadHealth} unsigned />
+        </div>
+      )}
 
       {hasV2 && <ScoreBreakdown v={v2} />}
 

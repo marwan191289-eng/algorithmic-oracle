@@ -26,6 +26,9 @@ export function DataQualityBar({ symbol }: { symbol: string }) {
         <div className="flex items-center gap-2 text-sm font-semibold">
           <Activity className="size-4 text-primary" />
           وضع التدقيق — جودة بيانات Binance
+          <span className="text-[10px] mono font-normal px-2 py-0.5 rounded border border-primary/30 text-primary bg-primary/10">
+            REST polling · دفتر 1ث / سعر 2ث (ليس WebSocket)
+          </span>
         </div>
         <div className="flex items-center gap-2 text-[11px] mono">
           <label className="flex items-center gap-1.5 cursor-pointer">
@@ -58,7 +61,7 @@ export function DataQualityBar({ symbol }: { symbol: string }) {
         />
         <QChip label="التحديث" value={`${(q?.updateRateHz ?? 0).toFixed(1)} Hz`} />
         <QChip
-          label="التأخر"
+          label="زمن الطلب"
           value={`${(q?.latencyMs ?? 0).toFixed(0)} ms`}
           tone={
             (q?.latencyMs ?? 0) < 250 ? "ok" : (q?.latencyMs ?? 0) < 600 ? "warn" : "bad"

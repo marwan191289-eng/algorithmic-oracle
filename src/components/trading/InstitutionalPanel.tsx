@@ -69,14 +69,9 @@ export function InstitutionalPanel({ verdict }: { verdict: InstitutionalVerdict 
             {verdict.label}
           </div>
 
-          {/* Signal tags row */}
+          {/* Signal tags row — confidence lives in the card below (no duplication) */}
           {hasV2 && (
             <div className="flex flex-wrap gap-2">
-              <Tag
-                label="ثقة الإشارة"
-                value={`${v2.confidence}%`}
-                color={v2.confidence >= 70 ? "bull" : v2.confidence >= 50 ? "gold" : "bear"}
-              />
               <Tag
                 label="Composite"
                 value={`${v2.compositeScore.value >= 0 ? "+" : ""}${v2.compositeScore.value} · ${v2.compositeScore.regime}`}
